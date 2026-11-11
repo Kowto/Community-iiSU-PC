@@ -441,6 +441,33 @@ def fix_extract_native_libs(decompiled_dir: Path) -> None:
     manifest.write_text(text.replace('android:extractNativeLibs="false"', 'android:extractNativeLibs="true"'), encoding="utf-8")
 
 
+def enable_large_heap(decompiled_dir: Path) -> bool:
+    """Sets android:largeHeap="true" on iiSU's <application>.
+
+    iiSU sizes Coil's in-memory image cache at 16% of the app's memory class,
+    and Coil reads that as ActivityManager.getLargeMemoryClass() when the app
+    has largeHeap set, getMemoryClass() otherwise (checked in Alpha 7.5's
+    newImageLoader and Coil's percent-of-memory sizing). On the AVD that is
+    576 MB instead of 192 MB, so the cache grows from about 31 MB to about
+    92 MB: at a 4K VM resolution the smaller cache only held a few screens of
+    cover art, and covers reloaded every time they scrolled back into view.
+    Returns whether the manifest changed (False when it was already set)."""
+    manifest = decompiled_dir / "AndroidManifest.xml"
+    text = manifest.read_text(encoding="utf-8")
+    match = re.search(r"<application\b[^>]*>", text)
+    if match is None:
+        raise RuntimeError("Could not find <application> in AndroidManifest.xml.")
+    tag = match.group(0)
+    if 'android:largeHeap="true"' in tag:
+        return False
+    if "android:largeHeap=" in tag:
+        new_tag = re.sub(r'android:largeHeap="[^"]*"', 'android:largeHeap="true"', tag)
+    else:
+        new_tag = tag.replace("<application", '<application android:largeHeap="true"', 1)
+    manifest.write_text(text[:match.start()] + new_tag + text[match.end():], encoding="utf-8")
+    return True
+
+
 def zipalign(zipalign_exe: Path, unsigned_apk: Path, aligned_apk: Path) -> None:
     run([str(zipalign_exe), "-p", "-f", "4", str(unsigned_apk), str(aligned_apk)])
 
@@ -517,6 +544,8 @@ def patch_apk(
     inject_launch_bridge(decompiled_dir, primary_home_actions_class, asset_helper_class)
     patch_manifest_for_media_bridge(decompiled_dir)
     fix_extract_native_libs(decompiled_dir)
+    if enable_large_heap(decompiled_dir):
+        print("[patch] enabled largeHeap so iiSU keeps more cover art in memory")
 
     print("[patch] rebuilding...")
     build(decompiled_dir, unsigned_apk)

@@ -133,3 +133,51 @@ class MainActivityRefreshTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnableLargeHeapTests(unittest.TestCase):
+    """iiSU's Coil memory cache is sized from the large memory class once
+    largeHeap is set (576 MB instead of 192 MB on the AVD)."""
+
+    # The <application> tag as apktool decodes it from iiSU Alpha 7.5.
+    MANIFEST = (
+        '<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.iisulauncher">\n'
+        '    <application android:allowBackup="false" android:appCategory="game"\n'
+        '        android:extractNativeLibs="false" android:label="@string/app_name"\n'
+        '        android:name="com.iisulauncher.LairLauncherApplication">\n'
+        '        <activity android:name="com.iisulauncher.MainActivity"/>\n'
+        '    </application>\n'
+        '</manifest>\n'
+    )
+
+    def _run(self, manifest: str) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "AndroidManifest.xml"
+            path.write_text(manifest, encoding="utf-8")
+            changed = patch_iisu.enable_large_heap(Path(tmp))
+            return changed, path.read_text(encoding="utf-8")
+
+    def test_large_heap_is_added_to_the_application_tag(self):
+        changed, text = self._run(self.MANIFEST)
+        self.assertTrue(changed)
+        self.assertIn('<application android:largeHeap="true" android:allowBackup="false"', text)
+        self.assertEqual(text.count("largeHeap"), 1)
+        self.assertIn('<activity android:name="com.iisulauncher.MainActivity"/>', text)
+
+    def test_running_it_again_changes_nothing(self):
+        _, once = self._run(self.MANIFEST)
+        changed, twice = self._run(once)
+        self.assertFalse(changed)
+        self.assertEqual(once, twice)
+
+    def test_an_explicit_false_is_turned_on(self):
+        manifest = self.MANIFEST.replace("<application ", '<application android:largeHeap="false" ')
+        changed, text = self._run(manifest)
+        self.assertTrue(changed)
+        self.assertIn('android:largeHeap="true"', text)
+        self.assertNotIn('largeHeap="false"', text)
+
+    def test_a_manifest_without_an_application_tag_is_an_error(self):
+        with self.assertRaises(RuntimeError):
+            self._run('<manifest package="x"></manifest>\n')
