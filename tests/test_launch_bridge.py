@@ -7,7 +7,12 @@ a fake clock, so this needs no VM. Imports launch_bridge, which pulls in the
 Windows window helpers.
 """
 
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +84,51 @@ class LaunchIisuTests(unittest.TestCase):
         self.assertIn(f"+ {launch_bridge.BOOTANIM_WAIT_SECONDS} ))", script)
         self.assertIn(f"+ {launch_bridge.IISU_START_WAIT_SECONDS} ))", script)
         self.assertGreater(timeout, launch_bridge.BOOTANIM_WAIT_SECONDS + launch_bridge.IISU_START_WAIT_SECONDS)
+
+    def test_the_device_script_waits_only_as_long_as_a_boot_animation_needs(self):
+        """Runs the real device script in sh, with getprop and am faked by
+        files in a temporary folder."""
+        if shutil.which("sh") is None or sys.platform == "win32":
+            self.skipTest("needs a POSIX shell")
+        cases = (
+            # (props, expected wait in seconds as (min, max); the device counts
+            # whole seconds with date +%s, so an N s limit lasts N-1 to N s)
+            ({"init.svc.bootanim": "stopped"}, (0, 1)),
+            ({"sys.boot_completed": "1", "init.svc.bootanim": "running"}, (0, 1)),
+            ({}, (1, 2)),                             # -no-boot-anim: never set, grace of 2 s
+            ({"init.svc.bootanim": "running"}, (2, 3)),  # still animating: the 3 s cap
+        )
+        for props, (low, high) in cases:
+            with self.subTest(props=props):
+                elapsed, out = self._run_device_script(props, bootanim_wait=3, no_anim_grace=2)
+                self.assertIn("bootanim_done", out)
+                self.assertIn("started_attempt=1", out)
+                self.assertGreaterEqual(elapsed, low)
+                self.assertLessEqual(elapsed, high + 0.9)
+
+    def _run_device_script(self, props, bootanim_wait, no_anim_grace):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for name, value in props.items():
+                (tmp_path / f"prop_{name}").write_text(value)
+            getprop = tmp_path / "getprop"
+            getprop.write_text(f'#!/bin/sh\ncat "{tmp}/prop_$1" 2>/dev/null\n')
+            am = tmp_path / "am"
+            am.write_text("#!/bin/sh\necho Starting: Intent\n")
+            for tool in (getprop, am):
+                tool.chmod(0o755)
+            script = launch_bridge._LAUNCH_IISU_SCRIPT.format(
+                bootanim_wait=bootanim_wait, no_anim_grace=no_anim_grace, start_wait=5, component="x/y",
+            )
+            env = {**os.environ, "PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', '')}"}
+            started = time.monotonic()
+            result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env, timeout=30)
+            return time.monotonic() - started, result.stdout
+
+    def test_the_grace_for_a_missing_boot_animation_is_passed_to_the_device(self):
+        _, _, scripts = self._launch([(0, "__iisupc_exit=1")])
+        self.assertIn(f"+ {launch_bridge.NO_BOOTANIM_GRACE_SECONDS} ))", scripts[0][0])
+        self.assertLess(launch_bridge.NO_BOOTANIM_GRACE_SECONDS, launch_bridge.BOOTANIM_WAIT_SECONDS)
 
     def test_waydroid_does_not_wait_for_a_boot_animation(self):
         _, _, scripts = self._launch([(0, "__iisupc_exit=1")], waydroid=True)

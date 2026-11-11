@@ -344,10 +344,6 @@ RETROARCH_BY_EXTENSION = [
 # different way, not via the core filename), these need an explicit
 # remap rather than the generic "strip _android, swap .so for .dll"
 # transform retroarch_core_dll_for_android_core() otherwise applies.
-# Others are simply named differently per platform: Android's current
-# MAME core is "mamearcade", while the Windows build of the same core is
-# mame_libretro.dll (without this, RetroArch gets "cores/mamearcade_
-# libretro.dll", which doesn't exist, and exits straight back to iiSU).
 ANDROID_CORE_NAME_OVERRIDES = {
     "mupen64plus_next_gles3": "mupen64plus_next",
     "mupen64plus_next_gles2": "mupen64plus_next",
