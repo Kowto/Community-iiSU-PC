@@ -95,6 +95,10 @@ The Manager's **Games > Console** page lists every game detected in your ROM lib
 
 Both take effect on your next Start, not while Community-iiSU-PC is already running.
 
+### PS3 HDD (PSN) games
+
+A PS3 game installed to RPCS3's HDD is a folder, not a single file iiSU can list. Put the game folders in `<ROM directory>/ps3/game/<serial>/` (point RPCS3's `dev_hdd0` at `<ROM directory>/ps3/`), then add a small text file per game in the `ps3` folder, named the way you want it listed and ending in `.ps3` (for example `LittleBigPlanet.ps3`), containing only the game's serial (`NPUA80472`). iiSU lists the `.ps3` file like any game, and the launch bridge starts RPCS3 with that game's `game/<serial>/USRDIR/EBOOT.BIN`. Digital games still need their `.rap` license file installed in RPCS3.
+
 ### Per-game settings
 
 Right-click a single game and choose **Game Settings...** to change how just that game launches: use a different PC emulator than the console default, add extra command-line flags, set environment variables, or run a program (a display-mode switcher, a helper script) and wait for it before the game starts. Games with settings are marked "(custom settings)" in the list. They're stored in `bridge/config.json` under `game_overrides`, keyed by the ROM's file name, and apply on that game's next launch with no restart. A pre-launch program that fails or runs longer than 30 seconds is logged and the game launches anyway. RetroArch can't be picked as the override emulator because it needs a core chosen per file type.

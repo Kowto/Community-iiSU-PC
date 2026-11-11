@@ -129,6 +129,11 @@ class RetroarchCoreTranslationTests(unittest.TestCase):
             "mupen64plus_next_libretro.dll",
         )
 
+    def test_android_mamearcade_maps_to_the_windows_mame_core(self):
+        for sent in ("mamearcade_libretro_android.so", "/data/data/com.retroarch/cores/mamearcade_libretro_android.so"):
+            with self.subTest(sent=sent):
+                self.assertEqual(retroarch_core_dll_for_android_core(sent), "mame_libretro.dll")
+
     def test_the_full_device_path_iisu_7_5_sends_is_reduced_to_the_file_name(self):
         # Seen live: -L cores//data/data/com.retroarch/cores/snes9x_libretro.dll,
         # and RetroArch exited at once for every game.
