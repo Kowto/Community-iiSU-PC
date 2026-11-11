@@ -329,8 +329,8 @@ def _stop_emulator_process(process) -> None:
         else:
             import signal
             try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except OSError:
+                os.killpg(os.getpgid(process.pid), getattr(signal, "SIGKILL", signal.SIGTERM))
+            except (OSError, AttributeError):  # no such group, or no killpg (Windows)
                 process.kill()
     except OSError as e:
         print(f"[start] couldn't stop it ({e})")
