@@ -307,8 +307,8 @@ class ManagerWindowSmokeTests(unittest.TestCase):
             QTest.mouseClick(label, Qt.MouseButton.RightButton, pos=QPoint(5, 5))
             opened.assert_not_called()
             QTest.mouseClick(label, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
-        opened.assert_called_once_with("https://github.com/MAGOOSKEE/Community-iiSU-PC/releases/tag/v0.5.7-alpha")
-        self.assertEqual(sidebar.release_url(None), "https://github.com/MAGOOSKEE/Community-iiSU-PC/releases")
+        opened.assert_called_once_with(f"https://github.com/{sidebar.updater.GITHUB_REPO}/releases/tag/v0.5.7-alpha")
+        self.assertEqual(sidebar.release_url(None), f"https://github.com/{sidebar.updater.GITHUB_REPO}/releases")
 
     def test_setups_screen_step_is_laid_out_like_the_display_page(self):
         from bridge.ui.onboarding_wizard import DisplayStep

@@ -59,7 +59,13 @@ from shared.platform_compat import subprocess_creationflags
 PROJECT_ROOT = Path(__file__).parent.parent
 GIT_DIR = PROJECT_ROOT / ".git"
 VERSION_PATH = PROJECT_ROOT / "VERSION"
-GITHUB_REPO = "MAGOOSKEE/Community-iiSU-PC"
+# Where updates come from. This is a fork of MAGOOSKEE/Community-iiSU-PC:
+# a plain (non-git) install checks this repository's releases, so updates keep
+# the fork's own changes instead of replacing them with upstream's files. To
+# take in an upstream release: sync the fork with upstream on GitHub, bump
+# VERSION, and publish a release on the fork tagged with that same version.
+UPSTREAM_GITHUB_REPO = "MAGOOSKEE/Community-iiSU-PC"
+GITHUB_REPO = "Kowto/Community-iiSU-PC"
 GIT_TIMEOUT = 10.0
 HTTP_TIMEOUT = 5.0
 DOWNLOAD_TIMEOUT = 30.0
