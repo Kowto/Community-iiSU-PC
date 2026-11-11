@@ -1,0 +1,483 @@
+{
+  "bridge_port": 7737,
+  "roms_dir": "D:/ROMs",
+  "search_roots": [
+    "D:/Emulators"
+  ],
+  "iisu_window_title": "iisuwin",
+  "iisu_fullscreen": true,
+  "iisu_component": "com.iisulauncher/com.iisulauncher.launcher.StartupSafeModeActivity",
+  "avd_name": "iisuwin",
+  "display": {
+    "width": 3840,
+    "height": 2160,
+    "density": 480,
+    "refresh_rate": 165,
+    "gpu_mode": "auto"
+  },
+  "quit_hotkey": {
+    "modifiers": [],
+    "key": "escape"
+  },
+  "shutdown_hotkey": {
+    "modifiers": [
+      "ctrl",
+      "alt"
+    ],
+    "key": "x"
+  },
+  "controller_quit_chord": [
+    "start",
+    "select"
+  ],
+  "usb_passthrough": [],
+  "show_boot_overlay": true,
+  "debug_show_console_windows": false,
+  "emulators": {
+    "com.github.stenzek.duckstation": {
+      "exe_names": [
+        "duckstation-qt-x64-ReleaseLTCG.exe"
+      ],
+      "pre_args": [
+        "-fullscreen"
+      ]
+    },
+    "org.dolphinemu.dolphinemu": {
+      "exe_names": [
+        "Dolphin.exe",
+        "DolphinQt2.exe"
+      ],
+      "pre_args": [
+        "-b",
+        "-C",
+        "Dolphin.Display.Fullscreen=True"
+      ]
+    },
+    "info.cemu.cemu": {
+      "exe_names": [
+        "Cemu.exe"
+      ],
+      "pre_args": [
+        "-f",
+        "true",
+        "--game"
+      ]
+    },
+    "org.citra.citra_emu": {
+      "exe_names": [
+        "citra-qt.exe"
+      ],
+      "pre_args": [
+        "-f"
+      ]
+    },
+    "org.azahar_emu.azahar": {
+      "exe_names": [
+        "citra-qt.exe",
+        "azahar.exe"
+      ],
+      "pre_args": [
+        "-f"
+      ]
+    },
+    "org.ppsspp.ppsspp": {
+      "exe_names": [
+        "PPSSPPWindows64.exe"
+      ],
+      "pre_args": [
+        "--fullscreen"
+      ]
+    },
+    "xyz.aethersx2.android": {
+      "exe_names": [
+        "pcsx2-qt.exe",
+        "pcsx2.exe"
+      ],
+      "pre_args": [
+        "-fullscreen"
+      ]
+    },
+    "me.magnum.melonds": {
+      "exe_names": [
+        "melonDS.exe"
+      ],
+      "pre_args": [
+        "-f"
+      ]
+    },
+    "me.magnum.melondualds": {
+      "exe_names": [
+        "melonDS.exe"
+      ],
+      "pre_args": [
+        "-f"
+      ]
+    },
+    "com.flycast.emulator": {
+      "exe_names": [
+        "flycast.exe"
+      ],
+      "pre_args": [
+        "-config",
+        "window:fullscreen=yes"
+      ]
+    },
+    "aenu.aps3e": {
+      "exe_names": [
+        "rpcs3.exe"
+      ],
+      "pre_args": [
+        "--no-gui",
+        "--fullscreen"
+      ]
+    },
+    "org.vita3k.emulator": {
+      "exe_names": [
+        "Vita3K.exe"
+      ],
+      "pre_args": [
+        "-F"
+      ]
+    },
+    "org.citron.citron_emu": {
+      "exe_names": [
+        "eden.exe",
+        "Eden.exe"
+      ],
+      "pre_args": [
+        "-f",
+        "-g"
+      ]
+    },
+    "org.citron.citron_emu.ea": {
+      "exe_names": [
+        "citron.exe"
+      ],
+      "pre_args": [
+        "-f",
+        "-g"
+      ]
+    },
+    "com.izzy2lost.x1box": {
+      "exe_names": [
+        "xemu.exe"
+      ],
+      "pre_args": [
+        "-full-screen",
+        "-dvd_path"
+      ]
+    },
+    "emu.x360.mobile": {
+      "exe_names": [
+        "xenia_canary.exe",
+        "xenia.exe"
+      ],
+      "pre_args": [
+        "--fullscreen"
+      ]
+    },
+    "app.gamenative": {
+      "exe_names": [
+        "steam.exe"
+      ],
+      "pre_args": []
+    },
+    "com.retroarch": {
+      "by_extension": {
+        ".cue": {
+          "exe_names": [
+            "duckstation-qt-x64-ReleaseLTCG.exe"
+          ],
+          "pre_args": [
+            "-fullscreen"
+          ]
+        },
+        ".bin": {
+          "exe_names": [
+            "duckstation-qt-x64-ReleaseLTCG.exe"
+          ],
+          "pre_args": [
+            "-fullscreen"
+          ]
+        },
+        ".pbp": {
+          "exe_names": [
+            "duckstation-qt-x64-ReleaseLTCG.exe"
+          ],
+          "pre_args": [
+            "-fullscreen"
+          ]
+        },
+        ".chd": {
+          "exe_names": [
+            "duckstation-qt-x64-ReleaseLTCG.exe"
+          ],
+          "pre_args": [
+            "-fullscreen"
+          ]
+        },
+        ".m3u": {
+          "exe_names": [
+            "duckstation-qt-x64-ReleaseLTCG.exe"
+          ],
+          "pre_args": [
+            "-fullscreen"
+          ]
+        },
+        ".cdi": {
+          "exe_names": [
+            "flycast.exe"
+          ],
+          "pre_args": []
+        },
+        ".gdi": {
+          "exe_names": [
+            "flycast.exe"
+          ],
+          "pre_args": []
+        },
+        ".nes": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/fceumm_libretro.dll",
+            "-f"
+          ]
+        },
+        ".fds": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/fceumm_libretro.dll",
+            "-f"
+          ]
+        },
+        ".unf": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/fceumm_libretro.dll",
+            "-f"
+          ]
+        },
+        ".unif": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/fceumm_libretro.dll",
+            "-f"
+          ]
+        },
+        ".sfc": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/snes9x_libretro.dll",
+            "-f"
+          ]
+        },
+        ".smc": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/snes9x_libretro.dll",
+            "-f"
+          ]
+        },
+        ".bs": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/snes9x_libretro.dll",
+            "-f"
+          ]
+        },
+        ".bsx": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/snes9x_libretro.dll",
+            "-f"
+          ]
+        },
+        ".swc": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/snes9x_libretro.dll",
+            "-f"
+          ]
+        },
+        ".z64": {
+          "exe_names": [
+            "gopher64-windows-x86_64.exe",
+            "gopher64.exe"
+          ],
+          "pre_args": [
+            "--fullscreen"
+          ]
+        },
+        ".v64": {
+          "exe_names": [
+            "gopher64-windows-x86_64.exe",
+            "gopher64.exe"
+          ],
+          "pre_args": [
+            "--fullscreen"
+          ]
+        },
+        ".gba": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/mgba_libretro.dll",
+            "-f"
+          ]
+        },
+        ".gb": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/gambatte_libretro.dll",
+            "-f"
+          ]
+        },
+        ".gbc": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/gambatte_libretro.dll",
+            "-f"
+          ]
+        },
+        ".md": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/genesis_plus_gx_libretro.dll",
+            "-f"
+          ]
+        },
+        ".gen": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/genesis_plus_gx_libretro.dll",
+            "-f"
+          ]
+        },
+        ".smd": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/genesis_plus_gx_libretro.dll",
+            "-f"
+          ]
+        },
+        ".sms": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/genesis_plus_gx_libretro.dll",
+            "-f"
+          ]
+        },
+        ".gg": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/genesis_plus_gx_libretro.dll",
+            "-f"
+          ]
+        },
+        ".32x": {
+          "exe_names": [
+            "retroarch.exe"
+          ],
+          "pre_args": [
+            "-L",
+            "cores/genesis_plus_gx_libretro.dll",
+            "-f"
+          ]
+        }
+      }
+    },
+    "org.yuzu.yuzu_emu": {
+      "exe_names": [
+        "eden.exe"
+      ],
+      "pre_args": [
+        "-f"
+      ]
+    },
+    "org.mupen64plusae.v3.fzurita": {
+      "exe_names": [
+        "gopher64-windows-x86_64.exe"
+      ],
+      "pre_args": []
+    },
+    "org.kenjinx.android": {
+      "exe_names": [
+        "Ryujinx.exe"
+      ],
+      "pre_args": [
+        "--fullscreen"
+      ]
+    },
+    "com.explusalpha.NeoEmu": {
+      "exe_names": [
+        "supermodel.exe"
+      ],
+      "pre_args": []
+    }
+  },
+  "auto_updates": true,
+  "emulator_profiles": {
+    "active": "Default",
+    "profiles": {
+      "Default": {
+        "gpu_mode": "host",
+        "accel": "auto",
+        "cores": 0,
+        "ram_mb": 0,
+        "audio": "no_input",
+        "extra_args": "-no-snapshot -no-boot-anim",
+        "env": ""
+      }
+    }
+  }
+}
