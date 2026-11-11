@@ -428,7 +428,8 @@ def launch_iisu(config: dict) -> None:
     # waydroid_backend.start() and has no boot animation to watch for.
     bootanim_wait = 0 if _is_waydroid(config) else BOOTANIM_WAIT_SECONDS
     script = _LAUNCH_IISU_SCRIPT.format(
-        bootanim_wait=bootanim_wait, start_wait=IISU_START_WAIT_SECONDS, component=adb_client.quote(component),
+        bootanim_wait=bootanim_wait, no_anim_grace=NO_BOOTANIM_GRACE_SECONDS,
+        start_wait=IISU_START_WAIT_SECONDS, component=adb_client.quote(component),
     )
     boot_wait = None
     attempt = None
@@ -459,9 +460,22 @@ def launch_iisu(config: dict) -> None:
 # then retries `am start` until Android accepts it (up to {start_wait}s),
 # checking every 0.2 seconds. Prints bootanim_done, then started_attempt=N
 # and exits 0 on success; exits 1 with am start's last output otherwise.
+# The boot animation wait ends when the animation has stopped, when Android
+# reports the boot complete, or when no animation has started at all within
+# NO_BOOTANIM_GRACE_SECONDS: the emulator's -no-boot-anim flag means
+# init.svc.bootanim is never set, and waiting for "stopped" then sat out the
+# whole BOOTANIM_WAIT_SECONDS cap (seen live: iiSU up and playing music on
+# its own, as Android's home app, while the bridge waited 90 s to fullscreen
+# it). Ending early is always safe, the am start loop below retries anyway.
 _LAUNCH_IISU_SCRIPT = (
-    "end=$(( $(date +%s) + {bootanim_wait} )); "
-    "while [ \"$(getprop init.svc.bootanim)\" != stopped ] && [ $(date +%s) -lt $end ]; do sleep 0.2; done; "
+    "end=$(( $(date +%s) + {bootanim_wait} )); quiet=$(( $(date +%s) + {no_anim_grace} )); seen=; "
+    "while [ $(date +%s) -lt $end ]; do "
+    "s=$(getprop init.svc.bootanim); "
+    "[ \"$s\" = stopped ] && break; "
+    "[ \"$(getprop sys.boot_completed)\" = 1 ] && break; "
+    "if [ -n \"$s\" ]; then seen=1; elif [ -z \"$seen\" ] && [ $(date +%s) -ge $quiet ]; then break; fi; "
+    "sleep 0.2; "
+    "done; "
     "echo bootanim_done; "
     "end=$(( $(date +%s) + {start_wait} )); n=0; out=; "
     "while [ $(date +%s) -lt $end ]; do "
@@ -471,6 +485,9 @@ _LAUNCH_IISU_SCRIPT = (
     "echo \"$out\"; exit 1"
 )
 IISU_START_WAIT_SECONDS = 60
+# How long to wait for a boot animation that hasn't started before assuming
+# there is none (the emulator was started with -no-boot-anim).
+NO_BOOTANIM_GRACE_SECONDS = 8
 # How long a launched emulator's window keeps being pushed to the front.
 EMULATOR_FOCUS_SECONDS = 6.0
 # A Windows game or emulator that quits this soon after it was tracked may have
