@@ -267,3 +267,109 @@ class BrowserDecodeParallelismTests(unittest.TestCase):
     def test_the_limit_must_fit_the_instruction(self):
         with self.assertRaises(ValueError):
             patch_iisu.raise_browser_decode_parallelism(Path("."), limit=8)
+
+
+class WidenBrowserPrefetchTests(unittest.TestCase):
+    """iiSU's grid window (s13.W in Alpha 7.5) loads covers one row beyond the
+    screen (one screen length for free-form layouts); the patch widens both."""
+
+    # Trimmed from Alpha 7.5's s13.W, .line markers included as apktool writes them.
+    WINDOW = (
+        ".class public final Ls13;\n"
+        ".super Ljava/lang/Object;\n\n"
+        ".method public static W(Ls13;)Lyd9;\n"
+        "    .locals 13\n\n"
+        "    const/high16 v5, 0x3f800000    # 1.0f\n\n"
+        "    if-eqz v4, :cond_14\n\n"
+        "    .line 206\n"
+        "    iget v1, v1, Ll13;->a:F\n\n"
+        "    .line 207\n"
+        "    .line 208\n"
+        "    mul-float/2addr v5, v1\n\n"
+        "    :cond_14\n"
+        "    invoke-static {v3, v4}, Ljava/lang/Math;->floor(D)D\n\n"
+        "    invoke-static {v3, v4}, Ljava/lang/Math;->ceil(D)D\n\n"
+        "    .line 361\n"
+        "    sub-int/2addr v0, v6\n\n"
+        "    .line 362\n"
+        "    mul-int/2addr v0, v2\n\n"
+        "    .line 363\n"
+        "    if-gez v0, :cond_17\n\n"
+        "    .line 364\n"
+        "    .line 365\n"
+        "    goto :goto_d\n\n"
+        "    .line 366\n"
+        "    :cond_17\n"
+        "    move v9, v0\n\n"
+        "    .line 367\n"
+        "    :goto_d\n"
+        "    add-int/lit8 v1, v1, 0x2\n\n"
+        "    .line 368\n"
+        "    .line 369\n"
+        "    mul-int/2addr v1, v2\n\n"
+        "    invoke-direct {v5, v3, v4, v9, v1}, Lyd9;-><init>(IIII)V\n\n"
+        "    return-object v5\n"
+        ".end method\n"
+    )
+
+    def _run(self, files: dict[str, str], **kwargs) -> tuple[bool, dict[str, str], unittest.mock.MagicMock]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, text in files.items():
+                (root / name).write_text(text, encoding="utf-8")
+            with patch("builtins.print") as printed:
+                changed = patch_iisu.widen_browser_prefetch(root, **kwargs)
+            return changed, {name: (root / name).read_text(encoding="utf-8") for name in files}, printed
+
+    def test_uniform_and_free_form_grids_are_widened(self):
+        changed, out, printed = self._run({"s13.smali": self.WINDOW})
+        text = out["s13.smali"]
+        self.assertTrue(changed)
+        self.assertIn("    .line 361\n    add-int/lit8 v0, v0, -0x6\n\n    .line 362\n    mul-int/2addr v0, v2", text)
+        self.assertIn("    :goto_d\n    add-int/lit8 v1, v1, 0x7\n", text)
+        self.assertIn("iget v1, v1, Ll13;->a:F\n\n    .line 207\n    .line 208\n    const/high16 v5, 0x40000000\n\n    mul-float/2addr v5, v1", text)
+        self.assertNotIn("sub-int/2addr v0, v6", text)
+        # the method's opening 1.0f is still there for its other branches
+        self.assertIn("const/high16 v5, 0x3f800000    # 1.0f", text)
+        printed.assert_not_called()
+
+    def test_custom_amounts(self):
+        _, out, _ = self._run({"s13.smali": self.WINDOW}, rows=4, screens=3.0)
+        text = out["s13.smali"]
+        self.assertIn("add-int/lit8 v0, v0, -0x4", text)
+        self.assertIn("add-int/lit8 v1, v1, 0x5", text)
+        self.assertIn("const/high16 v5, 0x40400000", text)
+
+    def test_running_it_again_changes_nothing_and_says_nothing(self):
+        _, out, _ = self._run({"s13.smali": self.WINDOW})
+        changed, again, printed = self._run(out)
+        self.assertFalse(changed)
+        self.assertEqual(again, out)
+        printed.assert_not_called()
+
+    def test_an_unfamiliar_build_is_left_unchanged(self):
+        changed_build = self.WINDOW.replace("add-int/lit8 v1, v1, 0x2", "add-int/lit8 v1, v1, 0x3")
+        changed, out, printed = self._run({"s13.smali": changed_build})
+        self.assertFalse(changed)
+        self.assertEqual(out["s13.smali"], changed_build)
+        self.assertIn("leaving how far ahead", printed.call_args.args[0])
+
+    def test_two_lookalike_methods_are_left_unchanged(self):
+        changed, out, _ = self._run({"s13.smali": self.WINDOW, "t13.smali": self.WINDOW.replace("Ls13;", "Lt13;")})
+        self.assertFalse(changed)
+        self.assertEqual(out["s13.smali"], self.WINDOW)
+
+    def test_without_the_free_form_margin_only_uniform_grids_change(self):
+        no_margin = self.WINDOW.replace("    mul-float/2addr v5, v1\n", "")
+        changed, out, printed = self._run({"s13.smali": no_margin})
+        self.assertTrue(changed)
+        self.assertIn("add-int/lit8 v0, v0, -0x6", out["s13.smali"])
+        self.assertNotIn("0x40000000", out["s13.smali"])
+        self.assertIn("only uniform grids", printed.call_args.args[0])
+
+    def test_amounts_must_fit_the_instructions(self):
+        for kwargs in ({"rows": 8}, {"rows": 1}, {"screens": 1.0}, {"screens": 9.0}):
+            with self.subTest(**kwargs), self.assertRaises(ValueError):
+                patch_iisu.widen_browser_prefetch(Path("."), **kwargs)
+        with self.assertRaises(ValueError):
+            patch_iisu._float_bits(2.1)

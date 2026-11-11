@@ -40,6 +40,7 @@ those are now discovered at patch time too (find_asset_helper_class()).
 
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -534,6 +535,97 @@ def raise_browser_decode_parallelism(decompiled_dir: Path, limit: int = BROWSER_
     return True
 
 
+# How far beyond the screen the home screen's grids load covers ahead of time.
+BROWSER_PREFETCH_ROWS = 6        # uniform grids: rows above and below the screen (iiSU: 1)
+BROWSER_PREFETCH_SCREENS = 2.0   # free-form grids: screen lengths either side (iiSU: 1.0)
+
+_GAP = r"(?:\s*\.line \d+)*\s*"  # whitespace and apktool's .line markers between instructions
+# The tail of the uniform-grid branch of iiSU's window calculation (s13.W in
+# Alpha 7.5): overscanStart = (firstRow - 1) * columns, overscanEnd =
+# (lastRow + 2) * columns, i.e. one row of covers loaded beyond each edge.
+def _grid_overscan(start: str, end: str) -> re.Pattern:
+    """start: how the first overscan row is derived from the first visible row,
+    as a regex whose group 1 is that register; end: the rows added to the
+    last visible row for the end of the overscan (exclusive)."""
+    return re.compile(
+        rf"{start}{_GAP}mul-int/2addr \1, (v\d+){_GAP}if-gez \1, :(\w+){_GAP}goto :(\w+){_GAP}"
+        rf":\3{_GAP}move v\d+, \1{_GAP}:\4{_GAP}add-int/lit8 (v\d+), \5, {end}{_GAP}mul-int/2addr \5, \2"
+    )
+
+
+_GRID_OVERSCAN = _grid_overscan(r"sub-int/2addr (v\d+), v\d+", "0x2")
+# The free-form branch of the same method: margin = 1.0f * viewport length,
+# where the viewport length was just read from the layout's "a" field.
+_FREEFORM_MARGIN = re.compile(rf"(iget (v\d+), \2, L[\w/$]+;->a:F{_GAP})(mul-float/2addr (v\d+), \2)")
+
+
+def _float_bits(value: float) -> str:
+    """A float's bits as const/high16 wants them (only the top 16 bits may be set)."""
+    bits = struct.unpack(">I", struct.pack(">f", value))[0]
+    if bits & 0xFFFF:
+        raise ValueError(f"{value} can't be loaded with const/high16")
+    return hex(bits)
+
+
+def widen_browser_prefetch(
+    decompiled_dir: Path, rows: int = BROWSER_PREFETCH_ROWS, screens: float = BROWSER_PREFETCH_SCREENS
+) -> bool:
+    """Makes the home screen load covers further ahead of where you're looking.
+
+    iiSU's grid only asks for covers one row beyond the visible area (one
+    screen length for free-form layouts), so while scrolling, new covers are
+    requested only as they arrive and show blank until decoded. Asking for
+    `rows` rows (or `screens` screen lengths) beyond each edge starts them
+    decoding well before they come into view. Covers already in the cache
+    cost nothing, so this mainly moves work iiSU would do anyway earlier.
+
+    The method is found by its shape (the uniform-grid tail, matched exactly
+    once, in a method that also calls Math.floor and Math.ceil), since its
+    obfuscated name changes between iiSU builds. If it isn't found, nothing
+    changes and False is returned; an already-widened build is left alone
+    quietly."""
+    if not 1 < rows <= 7 or not 1.0 < screens <= 8.0:
+        raise ValueError("rows must be 2-7 and screens more than 1 and at most 8")
+    widened = _grid_overscan(rf"add-int/lit8 (v\d+), \1, -{hex(rows)}", hex(rows + 1))
+    matches, already = [], 0
+    for path in decompiled_dir.rglob("*.smali"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "Ljava/lang/Math;->floor(D)D" not in text:
+            continue
+        for method in re.finditer(r"^\.method [^\n]*\n.*?^\.end method", text, re.S | re.M):
+            body = method.group(0)
+            if "Ljava/lang/Math;->ceil(D)D" in body and "Ljava/lang/Math;->floor(D)D" in body:
+                matches.extend((path, method.start(), method.end(), m) for m in _GRID_OVERSCAN.finditer(body))
+                already += len(widened.findall(body))
+    if not matches and already == 1:
+        return False  # already widened (an APK that was patched before)
+    if len(matches) != 1:
+        print(f"[patch] WARNING: couldn't find iiSU's home-screen grid window ({len(matches)} matches), "
+              "leaving how far ahead it loads covers as is.")
+        return False
+    path, start, end, m = matches[0]
+    text = path.read_text(encoding="utf-8")
+    body = text[start:end]
+    start_reg, end_reg = m.group(1), m.group(5)
+    tail = m.group(0)
+    tail = re.sub(rf"^sub-int/2addr {start_reg}, v\d+",
+                  f"add-int/lit8 {start_reg}, {start_reg}, -{hex(rows)}", tail, count=1)
+    tail = tail.replace(f"add-int/lit8 {end_reg}, {end_reg}, 0x2", f"add-int/lit8 {end_reg}, {end_reg}, {hex(rows + 1)}", 1)
+    body = body[: m.start()] + tail + body[m.end():]
+
+    margins = list(_FREEFORM_MARGIN.finditer(body))
+    if len(margins) == 1:
+        mm = margins[0]
+        body = (body[: mm.start()] + mm.group(1)
+                + f"const/high16 {mm.group(4)}, {_float_bits(screens)}\n\n    "
+                + mm.group(3) + body[mm.end():])
+    else:
+        print(f"[patch] WARNING: {path.name}: free-form grid margin not found ({len(margins)} matches), "
+              "only uniform grids load further ahead.")
+    path.write_text(text[:start] + body + text[end:], encoding="utf-8")
+    return True
+
+
 def zipalign(zipalign_exe: Path, unsigned_apk: Path, aligned_apk: Path) -> None:
     run([str(zipalign_exe), "-p", "-f", "4", str(unsigned_apk), str(aligned_apk)])
 
@@ -614,6 +706,8 @@ def patch_apk(
         print("[patch] enabled largeHeap so iiSU keeps more cover art in memory")
     if raise_browser_decode_parallelism(decompiled_dir):
         print(f"[patch] home screen now decodes up to {BROWSER_DECODE_PARALLELISM} covers at once (was 2)")
+    if widen_browser_prefetch(decompiled_dir):
+        print(f"[patch] home screen now loads covers {BROWSER_PREFETCH_ROWS} rows ahead (was 1)")
 
     print("[patch] rebuilding...")
     build(decompiled_dir, unsigned_apk)
