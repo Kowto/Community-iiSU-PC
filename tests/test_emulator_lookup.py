@@ -8,6 +8,7 @@ Windows-only modules either, so this runs anywhere.
 
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -28,6 +29,7 @@ from emulator_lookup import (  # noqa: E402
     find_rom,
     friendly_emulator_name,
     load_path_cache,
+    resolve_ps3_serial_file,
     save_path_cache,
 )
 from shared.emulator_defaults import all_emulator_exe_names, build_emulators_map  # noqa: E402
@@ -239,6 +241,63 @@ class FindExecutableAndRomTests(unittest.TestCase):
         old.unlink()
         moved = self._touch("b", "Game.sfc")
         self.assertEqual(find_rom("Game.sfc", self.root, cache), moved)
+
+
+class Ps3SerialFileTests(unittest.TestCase):
+    """A .ps3 text file holding a PSN/HDD game's serial stands in for the
+    game folder in iiSU; the bridge launches that game's EBOOT.BIN."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.print = patch("builtins.print").start()
+        self.addCleanup(patch.stopall)
+
+    def _eboot(self, *parts):
+        path = self.root.joinpath(*parts, "USRDIR", "EBOOT.BIN")
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"x")
+        return path
+
+    def _serial_file(self, serial, name="LittleBigPlanet.ps3", folder="ps3"):
+        path = self.root / folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serial, encoding="utf-8")
+        return path
+
+    def test_the_serial_resolves_to_the_game_next_to_it(self):
+        eboot = self._eboot("ps3", "game", "NPUA80472")
+        stub = self._serial_file("NPUA80472\r\n")
+        self.assertEqual(resolve_ps3_serial_file(stub, self.root), eboot)
+
+    def test_find_rom_returns_and_caches_the_eboot(self):
+        eboot = self._eboot("ps3", "game", "NPUA80472")
+        self._serial_file("NPUA80472")
+        cache = {"roms": {}}
+        self.assertEqual(find_rom("LittleBigPlanet.ps3", self.root, cache), eboot)
+        self.assertEqual(find_rom("LittleBigPlanet.ps3", self.root, cache), eboot)
+
+    def test_a_serial_file_in_a_subfolder_falls_back_to_roms_ps3_game(self):
+        eboot = self._eboot("ps3", "game", "BLUS30109")
+        stub = self._serial_file("BLUS30109", folder="ps3/PSN")
+        self.assertEqual(resolve_ps3_serial_file(stub, self.root), eboot)
+
+    def test_a_missing_game_leaves_the_file_unchanged_and_says_so(self):
+        stub = self._serial_file("NPUA99999")
+        self.assertEqual(resolve_ps3_serial_file(stub, self.root), stub)
+        self.assertIn("NPUA99999", self.print.call_args.args[0])
+
+    def test_empty_or_path_like_contents_are_ignored(self):
+        for contents in ("", "  ", "../../etc", "C:\\game"):
+            with self.subTest(contents=contents):
+                stub = self._serial_file(contents)
+                self.assertEqual(resolve_ps3_serial_file(stub, self.root), stub)
+
+    def test_other_files_are_untouched(self):
+        iso = self.root / "ps3" / "Game.iso"
+        iso.parent.mkdir(parents=True)
+        iso.write_bytes(b"x")
+        self.assertEqual(resolve_ps3_serial_file(iso, self.root), iso)
 
 
 class EnsureRetroarchCoreTests(unittest.TestCase):

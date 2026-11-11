@@ -151,10 +151,39 @@ def find_rom(rom_filename: str, roms_dir: Path, cache: dict) -> Path | None:
         return None
     match = _find_by_name(roms_dir, {rom_filename}, ROM_SEARCH_MAX_DEPTH)
     if match:
+        match = resolve_ps3_serial_file(match, roms_dir)
         cache["roms"][cache_key] = str(match)
         return match
     cache["roms"].pop(cache_key, None)
     return None
+
+
+PS3_SERIAL_EXTENSION = ".ps3"
+
+
+def resolve_ps3_serial_file(path: Path, roms_dir: Path) -> Path:
+    """PS3 HDD (PSN) games are a folder of files, not one image iiSU can list.
+    The workaround is a small text file with a .ps3 extension, e.g.
+    LittleBigPlanet.ps3, holding just the game's serial (NPUA80472): iiSU
+    lists it like any game, and this swaps it for the game's real boot file,
+    <folder>/game/<serial>/USRDIR/EBOOT.BIN, looking next to the .ps3 file
+    first and then in <roms_dir>/ps3/game (the dev_hdd0 layout RPCS3 uses).
+    Any other file, or a .ps3 whose game can't be found, comes back
+    unchanged, so RPCS3 reports the problem itself."""
+    if path.suffix.lower() != PS3_SERIAL_EXTENSION:
+        return path
+    try:
+        serial = path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return path
+    if not serial or any(c in serial for c in "/\\:\n"):
+        return path
+    for game_dir in (path.parent / "game", Path(roms_dir) / "ps3" / "game"):
+        eboot = game_dir / serial / "USRDIR" / "EBOOT.BIN"
+        if eboot.is_file():
+            return eboot
+    print(f"[bridge] PS3 game {serial} (from {path.name}) not found under {path.parent / 'game'}")
+    return path
 
 
 def build_pc_launch_args(profile: dict, executable: Path, rom_path: Path | None) -> list[str]:

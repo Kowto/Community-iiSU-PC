@@ -7,6 +7,7 @@ to resume *from*, so the very next start's "quick resume" was never
 backed by anything real. No AVD or adb needed for either.
 """
 
+import shutil
 import sys
 import tempfile
 import unittest
@@ -383,9 +384,11 @@ class HeadlessSettleTests(unittest.TestCase):
         with patch.object(start_iisu_pc.subprocess, "Popen", return_value=process), \
              patch.object(start_iisu_pc, "is_avd_running", return_value=True), \
              patch.object(start_iisu_pc, "_wait_for_android_ui", side_effect=wait_for_ui) as ui_wait, \
+             patch.object(start_iisu_pc, "_stop_emulator_process") as stopped, \
              patch("builtins.open", unittest.mock.mock_open()), \
              patch("builtins.print") as printed:
             self.ui_wait = ui_wait
+            self.stopped = stopped
             self.printed = printed
             return start_iisu_pc._launch_once(Path("emulator.exe"), "iisuwin", {}, [], False, profile, False, headless)
 
@@ -407,8 +410,15 @@ class HeadlessSettleTests(unittest.TestCase):
         self.assertTrue(any("0xC0000005" in line for line in self._lines()))
 
     def test_android_not_finishing_its_boot_is_reported(self):
-        self.assertIsNone(self._launch(True, FakeProcess(self.clock), android_ui_up=False))
+        process = FakeProcess(self.clock)
+        self.assertIsNone(self._launch(True, process, android_ui_up=False))
         self.assertIn("[start] Android did not finish starting in time.", self._lines())
+        # the stuck emulator is stopped so the retry can take its lock files
+        self.stopped.assert_called_once_with(process)
+
+    def test_a_headless_start_that_stays_up_is_not_stopped(self):
+        self._launch(True, FakeProcess(self.clock))
+        self.stopped.assert_not_called()
 
     def test_a_windowed_start_does_not_wait(self):
         self.assertEqual(self._launch(False, FakeProcess(self.clock, lives=13, code=0xC0000005)), 4242)
@@ -506,3 +516,136 @@ class HeadlessLaunchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuickResumeTimeoutTests(unittest.TestCase):
+    """A quick resume that never comes up must not leave its frozen emulator
+    running: it holds hardware-qemu.ini.lock, and the cold-boot retry used to
+    crash with PermissionError trying to delete it."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        patcher = patch.object(start_iisu_pc, "time", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_resume_that_never_comes_up_stops_its_emulator(self):
+        process = FakeProcess(self.clock)  # never exits on its own
+        profile = start_iisu_pc.emulator_profiles.normalize_profile({})
+        with patch.object(start_iisu_pc.subprocess, "Popen", return_value=process), \
+             patch.object(start_iisu_pc, "is_avd_running", return_value=False), \
+             patch.object(start_iisu_pc, "_stop_emulator_process") as stopped, \
+             patch("builtins.open", unittest.mock.mock_open()), \
+             patch("builtins.print"):
+            pid = start_iisu_pc._launch_once(Path("emulator.exe"), "iisuwin", {}, [], False, profile, False, False)
+        self.assertIsNone(pid)
+        stopped.assert_called_once_with(process)
+
+
+class StopEmulatorProcessTests(unittest.TestCase):
+    class Proc:
+        pid = 4242
+
+        def __init__(self, running=True, wait_times_out=False):
+            self.running = running
+            self.wait_times_out = wait_times_out
+            self.killed = False
+            self.waited = None
+
+        def poll(self):
+            return None if self.running else 0
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.waited = timeout
+            if self.wait_times_out:
+                raise start_iisu_pc.subprocess.TimeoutExpired("emulator.exe", timeout)
+            return 0
+
+    def test_an_emulator_that_already_exited_is_left_alone(self):
+        proc = self.Proc(running=False)
+        with patch.object(start_iisu_pc.subprocess, "run") as run, patch("builtins.print"):
+            start_iisu_pc._stop_emulator_process(proc)
+        run.assert_not_called()
+        self.assertIsNone(proc.waited)
+
+    def test_windows_kills_the_whole_process_tree_and_waits(self):
+        proc = self.Proc()
+        with patch.object(start_iisu_pc, "IS_WINDOWS", True), \
+             patch.object(start_iisu_pc.subprocess, "run") as run, patch("builtins.print"):
+            start_iisu_pc._stop_emulator_process(proc)
+        self.assertEqual(run.call_args.args[0], ["taskkill", "/PID", "4242", "/T", "/F"])
+        self.assertEqual(proc.waited, start_iisu_pc.EMULATOR_STOP_WAIT)
+
+    def test_linux_kills_the_process_group(self):
+        proc = self.Proc()
+        with patch.object(start_iisu_pc, "IS_WINDOWS", False), \
+             patch.object(start_iisu_pc.os, "getpgid", return_value=999, create=True), \
+             patch.object(start_iisu_pc.os, "killpg", create=True) as killpg, patch("builtins.print"):
+            start_iisu_pc._stop_emulator_process(proc)
+        self.assertEqual(killpg.call_args.args[0], 999)
+        self.assertFalse(proc.killed)
+
+    def test_linux_falls_back_to_killing_the_process(self):
+        proc = self.Proc()
+        with patch.object(start_iisu_pc, "IS_WINDOWS", False), \
+             patch.object(start_iisu_pc.os, "getpgid", side_effect=ProcessLookupError, create=True), \
+             patch("builtins.print"):
+            start_iisu_pc._stop_emulator_process(proc)
+        self.assertTrue(proc.killed)
+
+    def test_an_emulator_that_will_not_exit_is_reported_not_raised(self):
+        proc = self.Proc(wait_times_out=True)
+        with patch.object(start_iisu_pc, "IS_WINDOWS", True), \
+             patch.object(start_iisu_pc.subprocess, "run"), patch("builtins.print") as printed:
+            start_iisu_pc._stop_emulator_process(proc)
+        self.assertTrue(any("still running" in c.args[0] for c in printed.call_args_list))
+
+
+class ClearStaleLocksTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        patcher = patch.object(start_iisu_pc.time, "sleep")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_lock_files_and_folders_are_removed(self):
+        (self.tmp / "multiinstance.lock").write_text("")
+        (self.tmp / "hardware-qemu.ini.lock").mkdir()
+        (self.tmp / "hardware-qemu.ini.lock" / "pid").write_text("1")
+        start_iisu_pc.clear_stale_locks(self.tmp)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_a_lock_that_stays_in_use_is_skipped_instead_of_crashing(self):
+        lock = self.tmp / "hardware-qemu.ini.lock"
+        lock.mkdir()
+        (lock / "pid").write_text("1")
+        real_unlink = Path.unlink
+
+        def unlink(path, missing_ok=False):
+            if path.name == "pid":
+                raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+            return real_unlink(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", unlink), patch("builtins.print") as printed:
+            start_iisu_pc.clear_stale_locks(self.tmp)  # must not raise
+        self.assertTrue(any("still in use" in c.args[0] for c in printed.call_args_list))
+
+    def test_a_lock_released_after_a_moment_is_removed(self):
+        lock = self.tmp / "multiinstance.lock"
+        lock.write_text("")
+        real_unlink = Path.unlink
+        calls = {"n": 0}
+
+        def unlink(path, missing_ok=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(32, "in use")
+            return real_unlink(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", unlink), patch("builtins.print"):
+            start_iisu_pc.clear_stale_locks(self.tmp)
+        self.assertFalse(lock.exists())

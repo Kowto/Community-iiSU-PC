@@ -88,6 +88,11 @@ BRIDGE_LOG_PATH = Path(__file__).parent / "bridge.log"
 AVD_BOOT_TIMEOUT = 300  # seconds
 MAX_LAUNCH_ATTEMPTS = 3
 RETRY_DELAY = 5  # seconds
+# Removing a lock file the emulator still holds: how many tries, how far apart.
+LOCK_REMOVE_ATTEMPTS = 5
+LOCK_REMOVE_DELAY = 1.0  # seconds
+# How long to wait for an emulator we force-stopped to actually exit.
+EMULATOR_STOP_WAIT = 15  # seconds
 # adb lists the VM as soon as the emulator is up, well before Android has finished
 # starting. A headless start (which has no bridge waiting on Android after it) waits
 # on the device for the boot animation to end, so its Ready means Android is up, then
@@ -277,10 +282,62 @@ def clear_stale_locks(avd_dir: Path) -> None:
     for lock_path in avd_dir.glob("*.lock"):
         if lock_path.is_dir():
             for child in lock_path.iterdir():
-                child.unlink(missing_ok=True)
-            lock_path.rmdir()
+                _remove_lock_path(child)
+        _remove_lock_path(lock_path)
+
+
+def _remove_lock_path(path: Path, attempts: int = LOCK_REMOVE_ATTEMPTS, delay: float = LOCK_REMOVE_DELAY) -> bool:
+    """Removes one lock file or (now empty) lock folder. Windows keeps an
+    emulator's lock open for a moment after the emulator is killed, so a
+    PermissionError is retried briefly; one that never clears is reported
+    and skipped instead of crashing the whole start (an emulator that's
+    really still running then fails this launch attempt on its own, which
+    the retry loop already handles)."""
+    for attempt in range(attempts):
+        try:
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink(missing_ok=True)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt == attempts - 1:
+                print(f"[start] couldn't remove {path.name} (still in use), leaving it")
+                return False
+            time.sleep(delay)
+    return False
+
+
+def _stop_emulator_process(process) -> None:
+    """Force-stops an emulator this start launched but is giving up on (a
+    quick resume that never came up, or a headless boot that didn't finish),
+    together with its child processes, and waits for it to exit. Without
+    this the frozen emulator keeps running and holding its lock files, so
+    the cold-boot retry that follows can't start (and used to crash on
+    the locked hardware-qemu.ini.lock)."""
+    if process.poll() is not None:
+        return
+    print(f"[start] stopping the emulator that didn't come up (PID {process.pid})...")
+    try:
+        if IS_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True, text=True, creationflags=CREATE_NO_WINDOW,
+            )
         else:
-            lock_path.unlink(missing_ok=True)
+            import signal
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except OSError:
+                process.kill()
+    except OSError as e:
+        print(f"[start] couldn't stop it ({e})")
+    try:
+        process.wait(timeout=EMULATOR_STOP_WAIT)
+    except subprocess.TimeoutExpired:
+        print(f"[start] it was still running after {EMULATOR_STOP_WAIT}s")
 
 
 def diagnose_system_image(avd_dir: Path, sdk_root: str) -> None:
@@ -475,6 +532,7 @@ def _launch_once(
     while time.time() < deadline:
         if is_avd_running(avd_name):
             if headless and not _headless_android_up(process, deadline):
+                _stop_emulator_process(process)
                 return None
             return process.pid
         if process.poll() is not None:
@@ -493,6 +551,7 @@ def _launch_once(
         "hardware virtualization enabled (Hyper-V/Windows Hypervisor Platform, or in your BIOS/UEFI), "
         "the emulator falls back to pure software rendering and can take several minutes."
     )
+    _stop_emulator_process(process)
     return None
 
 
