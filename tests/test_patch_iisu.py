@@ -181,3 +181,89 @@ class EnableLargeHeapTests(unittest.TestCase):
     def test_a_manifest_without_an_application_tag_is_an_error(self):
         with self.assertRaises(RuntimeError):
             self._run('<manifest package="x"></manifest>\n')
+
+
+class BrowserDecodeParallelismTests(unittest.TestCase):
+    """The home screen's cover loader (j80 in Alpha 7.5) starts at most 2
+    decodes at once; the patch raises that limit in both places it's used."""
+
+    # Trimmed from Alpha 7.5's j80.smali: the dispatch loop and the free-slot count.
+    LOADER = (
+        ".class public final Lj80;\n"
+        ".super Ljava/lang/Object;\n\n"
+        ".method public final K(Ljava/util/ArrayList;)V\n"
+        "    iget-object v6, v0, Lj80;->j:Ljava/util/LinkedHashSet;\n\n"
+        "    invoke-interface {v6}, Ljava/util/Set;->size()I\n\n"
+        "    .line 12\n"
+        "    move-result v6\n\n"
+        "    rsub-int/lit8 v6, v6, 0x2\n\n"
+        "    invoke-static {v6, v3}, Liz2;->r(II)I\n"
+        ".end method\n\n"
+        ".method public final y()V\n"
+        "    new-instance v0, Ljava/util/ArrayList;\n\n"
+        "    .line 2\n"
+        "    .line 3\n"
+        "    const/4 v1, 0x2\n\n"
+        "    .line 4\n"
+        "    invoke-direct {v0, v1}, Ljava/util/ArrayList;-><init>(I)V\n\n"
+        "    iget-object v3, p0, Lj80;->j:Ljava/util/LinkedHashSet;\n"
+        "    invoke-interface {v3}, Ljava/util/Set;->size()I\n"
+        "    move-result v3\n"
+        "    if-ge v3, v1, :cond_3\n"
+        ".end method\n\n"
+        ".method public final z()Ljava/lang/String;\n"
+        '    const-string v0, "inFlight="\n'
+        "    const/4 v2, 0x2\n"
+        ".end method\n"
+    )
+
+    def _tree(self, tmp: str, files: dict[str, str]) -> Path:
+        root = Path(tmp)
+        for name, text in files.items():
+            path = root / "smali" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return root
+
+    def test_both_uses_of_the_limit_are_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp, {"j80.smali": self.LOADER, "other.smali": ".class public final Lother;\n"})
+            with patch("builtins.print"):
+                self.assertTrue(patch_iisu.raise_browser_decode_parallelism(root))
+            text = (root / "smali" / "j80.smali").read_text(encoding="utf-8")
+        self.assertIn("rsub-int/lit8 v6, v6, 0x6", text)
+        self.assertIn("    const/4 v1, 0x6\n\n    .line 4\n    invoke-direct {v0, v1}, Ljava/util/ArrayList;-><init>(I)V", text)
+        # unrelated constants in the same class are untouched
+        self.assertIn("const/4 v2, 0x2", text)
+        self.assertEqual(text.count("0x6"), 2)
+
+    def test_an_already_patched_loader_is_left_alone_quietly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp, {"j80.smali": self.LOADER})
+            with patch("builtins.print"):
+                patch_iisu.raise_browser_decode_parallelism(root)
+            once = (root / "smali" / "j80.smali").read_text(encoding="utf-8")
+            with patch("builtins.print") as printed:
+                self.assertFalse(patch_iisu.raise_browser_decode_parallelism(root))
+            self.assertEqual((root / "smali" / "j80.smali").read_text(encoding="utf-8"), once)
+            printed.assert_not_called()
+
+    def test_an_unfamiliar_build_is_left_unchanged(self):
+        changed = self.LOADER.replace("rsub-int/lit8 v6, v6, 0x2", "rsub-int/lit8 v6, v6, 0x3")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp, {"j80.smali": changed})
+            with patch("builtins.print") as printed:
+                self.assertFalse(patch_iisu.raise_browser_decode_parallelism(root))
+            self.assertEqual((root / "smali" / "j80.smali").read_text(encoding="utf-8"), changed)
+        self.assertIn("leaving it as is", printed.call_args.args[0])
+
+    def test_no_loader_class_is_left_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp, {"other.smali": ".class public final Lother;\n"})
+            with patch("builtins.print") as printed:
+                self.assertFalse(patch_iisu.raise_browser_decode_parallelism(root))
+        self.assertIn("couldn't find", printed.call_args.args[0])
+
+    def test_the_limit_must_fit_the_instruction(self):
+        with self.assertRaises(ValueError):
+            patch_iisu.raise_browser_decode_parallelism(Path("."), limit=8)

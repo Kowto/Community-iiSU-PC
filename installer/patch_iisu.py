@@ -468,6 +468,72 @@ def enable_large_heap(decompiled_dir: Path) -> bool:
     return True
 
 
+# The home screen's cover loader logs its queue as "inFlight=N pending=N
+# queued=N"; that string finds its (obfuscated) class in any iiSU build.
+BROWSER_LOADER_LOG_MARKER = '"inFlight="'
+# How many covers the home screen may decode at once. iiSU Alpha 7.5 allows 2.
+BROWSER_DECODE_PARALLELISM = 6
+
+# In the loader's dispatch method: the limit loaded into a register right
+# before it sizes the batch list (new ArrayList(limit)), then compared with
+# the in-flight set's size in the loop that starts loads.
+def _dispatch_limit(value: int) -> re.Pattern:
+    return re.compile(
+        rf"const/4 (v\d+), {hex(value)}(\s*(?:\.line \d+\s*)*)"
+        r"invoke-direct \{(v\d+), \1\}, Ljava/util/ArrayList;-><init>\(I\)V"
+    )
+
+
+# In the method that works out how many free slots are left: limit - in flight.
+def _free_slots(value: int) -> re.Pattern:
+    return re.compile(
+        r"(invoke-interface \{(v\d+)\}, Ljava/util/Set;->size\(\)I\s*(?:\.line \d+\s*)*move-result \2\s*(?:\.line \d+\s*)*)"
+        rf"rsub-int/lit8 \2, \2, {hex(value)}"
+    )
+
+
+def raise_browser_decode_parallelism(decompiled_dir: Path, limit: int = BROWSER_DECODE_PARALLELISM) -> bool:
+    """Lets the home screen decode more cover art at once.
+
+    iiSU's home-screen cover loader starts at most 2 decodes at a time. On a
+    big library at 4K that queues hundreds of covers whenever the list moves
+    (seen live: 300-580 pending, about 55 decoded per second, and the same
+    speed with 6 CPU cores as with the default), so covers scrolled into
+    view stay blank for seconds. Raising the limit lets the decodes use the
+    VM's other cores. Only the two places the limit appears are changed: the
+    dispatch loop and the free-slot count. If either can't be found exactly
+    once (a different iiSU build), nothing is changed and False is returned,
+    so an unfamiliar build is left working as iiSU shipped it."""
+    if not 2 < limit <= 7:  # const/4 holds -8..7
+        raise ValueError("limit must be 3 to 7")
+    candidates = [
+        path for path in decompiled_dir.rglob("*.smali")
+        if BROWSER_LOADER_LOG_MARKER in path.read_text(encoding="utf-8", errors="replace")
+    ]
+    if len(candidates) != 1:
+        print(f"[patch] WARNING: couldn't find iiSU's home-screen cover loader ({len(candidates)} matches), "
+              "leaving its decode limit as is.")
+        return False
+    path = candidates[0]
+    text = path.read_text(encoding="utf-8")
+    if len(_dispatch_limit(limit).findall(text)) == 1 and len(_free_slots(limit).findall(text)) == 1:
+        return False  # already raised (an APK that was patched before)
+    dispatch = list(_dispatch_limit(2).finditer(text))
+    free_slots = list(_free_slots(2).finditer(text))
+    if len(dispatch) != 1 or len(free_slots) != 1:
+        print(f"[patch] WARNING: {path.name}'s decode limit isn't where expected "
+              f"({len(dispatch)} dispatch, {len(free_slots)} free-slot matches), leaving it as is.")
+        return False
+    text = _dispatch_limit(2).sub(
+        lambda m: f"const/4 {m.group(1)}, {hex(limit)}{m.group(2)}invoke-direct {{{m.group(3)}, {m.group(1)}}}, "
+                  "Ljava/util/ArrayList;-><init>(I)V",
+        text,
+    )
+    text = _free_slots(2).sub(lambda m: f"{m.group(1)}rsub-int/lit8 {m.group(2)}, {m.group(2)}, {hex(limit)}", text)
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 def zipalign(zipalign_exe: Path, unsigned_apk: Path, aligned_apk: Path) -> None:
     run([str(zipalign_exe), "-p", "-f", "4", str(unsigned_apk), str(aligned_apk)])
 
@@ -546,6 +612,8 @@ def patch_apk(
     fix_extract_native_libs(decompiled_dir)
     if enable_large_heap(decompiled_dir):
         print("[patch] enabled largeHeap so iiSU keeps more cover art in memory")
+    if raise_browser_decode_parallelism(decompiled_dir):
+        print(f"[patch] home screen now decodes up to {BROWSER_DECODE_PARALLELISM} covers at once (was 2)")
 
     print("[patch] rebuilding...")
     build(decompiled_dir, unsigned_apk)
