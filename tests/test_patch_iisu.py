@@ -404,7 +404,7 @@ class RaiseImageMemoryCacheTests(unittest.TestCase):
     def test_the_share_passed_to_the_cache_builder_is_raised(self):
         changed, text, printed = self._run(self.APPLICATION)
         self.assertTrue(changed)
-        self.assertIn("const-wide v1, 0x3fd6666666666666L", text)
+        self.assertIn("const-wide v1, 0x3fe0000000000000L", text)
         # an unrelated 0.16 in the same class is untouched
         self.assertIn("const-wide v3, 0x3fc47ae147ae147bL", text)
         printed.assert_not_called()
@@ -424,6 +424,6 @@ class RaiseImageMemoryCacheTests(unittest.TestCase):
         self.assertIn("isn't where expected", printed.call_args.args[0])
 
     def test_the_share_must_be_sensible(self):
-        for share in (0.16, 0.6):
+        for share in (0.16, 0.8):
             with self.subTest(share=share), self.assertRaises(ValueError):
                 patch_iisu.raise_image_memory_cache(Path("."), share=share)
