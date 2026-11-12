@@ -155,6 +155,18 @@ class RetroarchCoreTranslationTests(unittest.TestCase):
         self.assertIsNotNone(override)
         self.assertIn("flycast.exe", override["exe_names"])
 
+
+    def test_every_route_to_flycast_opens_it_fullscreen(self):
+        """Dreamcast games launched through iiSU's RetroArch option reach Flycast by
+        core or by extension; those used to pass no flags and opened a small window."""
+        override = standalone_profile_for_core_dll("flycast_libretro.dll")
+        self.assertEqual(override["pre_args"], ["-config", "window:fullscreen=yes"])
+        emulators = build_emulators_map()
+        for ext in (".cdi", ".gdi"):
+            with self.subTest(ext=ext):
+                self.assertEqual(emulators["com.retroarch"]["by_extension"][ext]["pre_args"],
+                                 ["-config", "window:fullscreen=yes"])
+        self.assertEqual(emulators["com.flycast.emulator"]["pre_args"], ["-config", "window:fullscreen=yes"])
     def test_core_without_override_returns_none(self):
         core_dll = retroarch_core_dll_for_android_core("fceumm_libretro_android.so")
         self.assertIsNone(standalone_profile_for_core_dll(core_dll))
