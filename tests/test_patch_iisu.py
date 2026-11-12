@@ -373,3 +373,57 @@ class WidenBrowserPrefetchTests(unittest.TestCase):
                 patch_iisu.widen_browser_prefetch(Path("."), **kwargs)
         with self.assertRaises(ValueError):
             patch_iisu._float_bits(2.1)
+
+
+class RaiseImageMemoryCacheTests(unittest.TestCase):
+    """iiSU's Coil memory cache: maxSizePercent(0.16, context) in newImageLoader."""
+
+    APPLICATION = (
+        ".class public final Lcom/iisulauncher/LairLauncherApplication;\n"
+        ".super Landroid/app/Application;\n\n"
+        ".method public final b(Landroid/content/Context;)Lsx4;\n"
+        "    new-instance v0, Lsy4;\n\n"
+        "    const/16 v1, 0xa\n\n"
+        "    invoke-direct {v0, v1}, Lsy4;-><init>(I)V\n\n"
+        "    .line 12\n"
+        "    const-wide v1, 0x3fc47ae147ae147bL    # 0.16\n\n"
+        "    invoke-virtual {v0, v1, v2, p0}, Lsy4;->m(DLandroid/content/Context;)V\n\n"
+        "    const-wide v3, 0x3fc47ae147ae147bL    # 0.16\n"
+        ".end method\n"
+    )
+
+    def _run(self, text: str, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "smali" / "com" / "iisulauncher" / "LairLauncherApplication.smali"
+            path.parent.mkdir(parents=True)
+            path.write_text(text, encoding="utf-8")
+            with patch("builtins.print") as printed:
+                changed = patch_iisu.raise_image_memory_cache(Path(tmp), **kwargs)
+            return changed, path.read_text(encoding="utf-8"), printed
+
+    def test_the_share_passed_to_the_cache_builder_is_raised(self):
+        changed, text, printed = self._run(self.APPLICATION)
+        self.assertTrue(changed)
+        self.assertIn("const-wide v1, 0x3fd6666666666666L", text)
+        # an unrelated 0.16 in the same class is untouched
+        self.assertIn("const-wide v3, 0x3fc47ae147ae147bL", text)
+        printed.assert_not_called()
+
+    def test_running_it_again_changes_nothing_and_says_nothing(self):
+        _, once, _ = self._run(self.APPLICATION)
+        changed, twice, printed = self._run(once)
+        self.assertFalse(changed)
+        self.assertEqual(once, twice)
+        printed.assert_not_called()
+
+    def test_a_different_share_in_a_newer_iisu_is_left_alone(self):
+        newer = self.APPLICATION.replace("const-wide v1, 0x3fc47ae147ae147bL", "const-wide v1, 0x3fc999999999999aL", 1)
+        changed, text, printed = self._run(newer)
+        self.assertFalse(changed)
+        self.assertEqual(text, newer)
+        self.assertIn("isn't where expected", printed.call_args.args[0])
+
+    def test_the_share_must_be_sensible(self):
+        for share in (0.16, 0.6):
+            with self.subTest(share=share), self.assertRaises(ValueError):
+                patch_iisu.raise_image_memory_cache(Path("."), share=share)

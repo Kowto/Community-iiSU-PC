@@ -626,6 +626,55 @@ def widen_browser_prefetch(
     return True
 
 
+# Share of iiSU's memory class its Coil image cache may use. iiSU uses 0.16.
+IMAGE_MEMORY_CACHE_SHARE = 0.35
+_APPLICATION_SMALI = "com/iisulauncher/LairLauncherApplication.smali"
+# newImageLoader: MemoryCache.Builder().maxSizePercent(share, context), the
+# share loaded as a double right before the call.
+_MEMORY_CACHE_SHARE = re.compile(
+    r"const-wide (v\d+), (0x[0-9a-f]+)L(?:\s*# [0-9.]+)?" + _GAP
+    + r"invoke-virtual \{(v\d+), \1, v\d+, (p\d+|v\d+)\}, L\w+;->\w+\(DLandroid/content/Context;\)V"
+)
+
+
+def _double_bits(value: float) -> str:
+    return hex(struct.unpack(">Q", struct.pack(">d", value))[0])
+
+
+def raise_image_memory_cache(decompiled_dir: Path, share: float = IMAGE_MEMORY_CACHE_SHARE) -> bool:
+    """Lets iiSU keep more decoded artwork in memory.
+
+    iiSU gives Coil, which draws the home screen's console pages, 16% of its
+    memory class for decoded images. With largeHeap that is about 92 MB, and
+    at 4K one console page's artwork alone is tens of MB, so paging back and
+    forth through a few consoles pushed the earlier pages out (seen live:
+    a page visited seconds before came back with blank tiles that popped in
+    a few hundred ms later). `share` of 576 MB keeps several pages resident.
+
+    Only the one maxSizePercent(double, Context) call in iiSU's Application
+    class is changed, and only while it still holds iiSU's 0.16; anything
+    else is left as is."""
+    if not 0.16 < share <= 0.5:
+        raise ValueError("share must be above 0.16 and at most 0.5")
+    candidates = [p for p in decompiled_dir.glob(f"smali*/{_APPLICATION_SMALI}") if p.is_file()]
+    if len(candidates) != 1:
+        print("[patch] WARNING: couldn't find iiSU's Application class, leaving its image cache size as is.")
+        return False
+    path = candidates[0]
+    text = path.read_text(encoding="utf-8")
+    calls = list(_MEMORY_CACHE_SHARE.finditer(text))
+    original = [m for m in calls if m.group(2) == _double_bits(0.16)]
+    if not original and any(m.group(2) == _double_bits(share) for m in calls):
+        return False  # already raised
+    if len(original) != 1:
+        print(f"[patch] WARNING: iiSU's image cache size isn't where expected ({len(original)} matches), leaving it as is.")
+        return False
+    m = original[0]
+    start, end = m.span(2)
+    path.write_text(text[:start] + _double_bits(share) + text[end:], encoding="utf-8")
+    return True
+
+
 def zipalign(zipalign_exe: Path, unsigned_apk: Path, aligned_apk: Path) -> None:
     run([str(zipalign_exe), "-p", "-f", "4", str(unsigned_apk), str(aligned_apk)])
 
@@ -708,6 +757,8 @@ def patch_apk(
         print(f"[patch] home screen now decodes up to {BROWSER_DECODE_PARALLELISM} covers at once (was 2)")
     if widen_browser_prefetch(decompiled_dir):
         print(f"[patch] home screen now loads covers {BROWSER_PREFETCH_ROWS} rows ahead (was 1)")
+    if raise_image_memory_cache(decompiled_dir):
+        print(f"[patch] iiSU's image memory cache raised to {IMAGE_MEMORY_CACHE_SHARE:.0%} of its memory (was 16%)")
 
     print("[patch] rebuilding...")
     build(decompiled_dir, unsigned_apk)
