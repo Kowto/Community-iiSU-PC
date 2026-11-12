@@ -404,7 +404,7 @@ class RaiseImageMemoryCacheTests(unittest.TestCase):
     def test_the_share_passed_to_the_cache_builder_is_raised(self):
         changed, text, printed = self._run(self.APPLICATION)
         self.assertTrue(changed)
-        self.assertIn("const-wide v1, 0x3fe0000000000000L", text)
+        self.assertIn("const-wide v1, 0x3fe8000000000000L", text)
         # an unrelated 0.16 in the same class is untouched
         self.assertIn("const-wide v3, 0x3fc47ae147ae147bL", text)
         printed.assert_not_called()

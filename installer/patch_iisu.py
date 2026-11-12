@@ -628,8 +628,8 @@ def widen_browser_prefetch(
 
 # Share of iiSU's memory class its Coil image cache may use. iiSU uses 0.16.
 # Bitmap pixels live in native memory (Android 8+), so this doesn't eat into
-# the Java heap that largeHeap governs; 0.5 of 576 MB is about 288 MB.
-IMAGE_MEMORY_CACHE_SHARE = 0.5
+# the Java heap that largeHeap governs; 0.75 of 576 MB is about 430 MB.
+IMAGE_MEMORY_CACHE_SHARE = 0.75
 _APPLICATION_SMALI = "com/iisulauncher/LairLauncherApplication.smali"
 # newImageLoader: MemoryCache.Builder().maxSizePercent(share, context), the
 # share loaded as a double right before the call.
@@ -652,7 +652,8 @@ def raise_image_memory_cache(decompiled_dir: Path, share: float = IMAGE_MEMORY_C
     forth through a few consoles pushed the earlier pages out (seen live:
     a page visited seconds before came back with blank tiles that popped in
     a few hundred ms later). `share` of 576 MB keeps several pages resident.
-    At 0.35 the blank time halved (to 3-4 frames) but didn't go away.
+    At 0.35 the blank time halved (to 3-4 frames) but didn't go away; at 0.5
+    a sweep through all 43 consoles kept the last 5-7 pages drawn.
 
     Only the one maxSizePercent(double, Context) call in iiSU's Application
     class is changed, and only while it still holds iiSU's 0.16; anything
