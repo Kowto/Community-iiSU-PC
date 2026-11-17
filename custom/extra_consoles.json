@@ -1,0 +1,114 @@
+{
+  "consoles": [
+    {
+      "shortName": "atarijaguarcd",
+      "longName": "Atari Jaguar CD",
+      "alternativeNames": [
+        "Jaguar CD",
+        "Atari Jaguar CD"
+      ],
+      "releaseYear": "1995",
+      "releaseDate": "1995-09-21",
+      "manufacturer": "Atari",
+      "retroAchievementsId": "77",
+      "romExtensions": [
+        ".cdi",
+        ".CDI",
+        ".chd",
+        ".CHD",
+        ".cue",
+        ".CUE"
+      ],
+      "emulators": [
+        {
+          "id": "retroarch",
+          "name": "RetroArch",
+          "routeType": "path",
+          "commands": [
+            {
+              "description": "BigPEmu (PC)",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/bigpemu_libretro_android.so -e ROM %ROM% --activity-clear-top"
+            },
+            {
+              "description": "Virtual Jaguar core",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/virtualjaguar_libretro_android.so -e ROM %ROM% --activity-clear-top"
+            }
+          ],
+          "packages": [
+            "com.retroarch",
+            "com.retroarch.aarch64",
+            "com.retroarch.ra32"
+          ]
+        }
+      ]
+    },
+    {
+      "shortName": "ps4",
+      "longName": "Sony PlayStation 4",
+      "alternativeNames": [
+        "PlayStation 4",
+        "PS4"
+      ],
+      "releaseYear": "2013",
+      "releaseDate": "2013-11-15",
+      "manufacturer": "Sony",
+      "retroAchievementsId": "NA",
+      "romExtensions": [
+        ".ps4",
+        ".PS4"
+      ],
+      "emulators": [
+        {
+          "id": "retroarch",
+          "name": "RetroArch",
+          "routeType": "path",
+          "commands": [
+            {
+              "description": "shadPS4 (PC)",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/shadps4_libretro_android.so -e ROM %ROM% --activity-clear-top"
+            }
+          ],
+          "packages": [
+            "com.retroarch",
+            "com.retroarch.aarch64",
+            "com.retroarch.ra32"
+          ]
+        }
+      ]
+    },
+    {
+      "shortName": "ps5",
+      "longName": "Sony PlayStation 5",
+      "alternativeNames": [
+        "PlayStation 5",
+        "PS5"
+      ],
+      "releaseYear": "2020",
+      "releaseDate": "2020-11-12",
+      "manufacturer": "Sony",
+      "retroAchievementsId": "NA",
+      "romExtensions": [
+        ".ps5",
+        ".PS5"
+      ],
+      "emulators": [
+        {
+          "id": "retroarch",
+          "name": "RetroArch",
+          "routeType": "path",
+          "commands": [
+            {
+              "description": "No PC emulator yet",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/ps5_libretro_android.so -e ROM %ROM% --activity-clear-top"
+            }
+          ],
+          "packages": [
+            "com.retroarch",
+            "com.retroarch.aarch64",
+            "com.retroarch.ra32"
+          ]
+        }
+      ]
+    }
+  ]
+}

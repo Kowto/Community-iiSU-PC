@@ -10,6 +10,7 @@ load_path_cache).
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.request
@@ -144,21 +145,49 @@ def find_rom(rom_filename: str, roms_dir: Path, cache: dict) -> Path | None:
     changing it in the Manager doesn't risk returning a stale path."""
     cache_key = f"{rom_filename}::{roms_dir}"
     cached = cache["roms"].get(cache_key)
-    if cached and Path(cached).is_file():
+    # An older bridge cached a serial file that hadn't resolved; skip it.
+    if cached and Path(cached).is_file() and Path(cached).suffix.lower() not in SERIAL_FILE_EXTENSIONS:
         return Path(cached)
 
     if not roms_dir.is_dir():
         return None
     match = _find_by_name(roms_dir, {rom_filename}, ROM_SEARCH_MAX_DEPTH)
     if match:
-        match = resolve_ps3_serial_file(match, roms_dir)
-        cache["roms"][cache_key] = str(match)
+        match = resolve_ps4_serial_file(resolve_ps3_serial_file(match, roms_dir), roms_dir)
+        # A serial file that didn't resolve to its game isn't cached, so the
+        # next launch looks again once the file or the game folder is fixed.
+        if match.suffix.lower() in SERIAL_FILE_EXTENSIONS:
+            cache["roms"].pop(cache_key, None)
+        else:
+            cache["roms"][cache_key] = str(match)
         return match
     cache["roms"].pop(cache_key, None)
     return None
 
 
 PS3_SERIAL_EXTENSION = ".ps3"
+
+
+SERIAL_FILE_EXTENSIONS = {".ps3", ".ps4", ".ps5"}
+_SERIAL = re.compile(r"[A-Za-z0-9_-]{4,32}")
+
+
+def read_serial_file(path: Path) -> str | None:
+    """The serial in a .ps3/.ps4 file, or None if there isn't a usable one.
+    Tolerates the ways Windows tools save a one-line text file: UTF-8 with
+    or without a BOM, UTF-16 (PowerShell 5's `echo X > file`), a trailing
+    newline, quotes or stray spaces."""
+    try:
+        data = path.read_bytes()[:4096]
+    except OSError:
+        return None
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = data.decode("utf-16", errors="ignore")
+    else:
+        text = data.decode("utf-8-sig", errors="ignore")
+    text = text.replace("\0", "").strip().strip("\"'").strip()
+    first = text.splitlines()[0].strip() if text else ""
+    return first if _SERIAL.fullmatch(first) else None
 
 
 def resolve_ps3_serial_file(path: Path, roms_dir: Path) -> Path:
@@ -172,18 +201,70 @@ def resolve_ps3_serial_file(path: Path, roms_dir: Path) -> Path:
     unchanged, so RPCS3 reports the problem itself."""
     if path.suffix.lower() != PS3_SERIAL_EXTENSION:
         return path
-    try:
-        serial = path.read_text(encoding="utf-8", errors="ignore").strip()
-    except OSError:
+    serial = read_serial_file(path)
+    if serial is None:
+        print(f"[bridge] {path.name} doesn't hold a PS3 serial (like NPUA80472) on its first line")
         return path
-    if not serial or any(c in serial for c in "/\\:\n"):
-        return path
-    for game_dir in (path.parent / "game", Path(roms_dir) / "ps3" / "game"):
+    ps3_dir = Path(roms_dir) / "ps3"
+    for game_dir in (
+        path.parent / "game",
+        path.parent / "dev_hdd0" / "game",
+        path.parent,
+        ps3_dir / "game",
+        ps3_dir / "dev_hdd0" / "game",
+    ):
         eboot = game_dir / serial / "USRDIR" / "EBOOT.BIN"
         if eboot.is_file():
             return eboot
-    print(f"[bridge] PS3 game {serial} (from {path.name}) not found under {path.parent / 'game'}")
+    print(f"[bridge] PS3 game {serial} (from {path.name}) not found: no {serial}\\USRDIR\\EBOOT.BIN under {path.parent / 'game'}")
     return path
+
+
+PS4_SERIAL_EXTENSION = ".ps4"
+
+
+def resolve_ps4_serial_file(path: Path, roms_dir: Path) -> Path:
+    """The PS4 counterpart of resolve_ps3_serial_file, for the PlayStation 4
+    console added to iiSU's console list by hand: a <name>.ps4 text file
+    holding the game's serial (CUSA00001) stands in for the dumped game
+    folder, and is swapped for <serial>/eboot.bin, the file shadPS4 boots.
+    The folder is looked for next to the .ps4 file, in a game subfolder
+    there, then in <roms_dir>/ps4 and <roms_dir>/ps4/game. Anything else
+    comes back unchanged."""
+    if path.suffix.lower() != PS4_SERIAL_EXTENSION:
+        return path
+    serial = read_serial_file(path)
+    if serial is None:
+        print(f"[bridge] {path.name} doesn't hold a PS4 serial (like CUSA00900) on its first line")
+        return path
+    ps4_dir = Path(roms_dir) / "ps4"
+    for game_dir in (path.parent, path.parent / "game", ps4_dir, ps4_dir / "game"):
+        for name in ("eboot.bin", "EBOOT.BIN"):
+            eboot = game_dir / serial / name
+            if eboot.is_file():
+                return eboot
+    print(f"[bridge] PS4 game {serial} (from {path.name}) not found next to it or under {ps4_dir}")
+    return path
+
+
+def unresolved_serial_file_reason(path: Path, roms_dir: Path) -> str | None:
+    """Why a .ps3/.ps4 serial file find_rom handed back wasn't swapped for
+    its game's boot file (find_rom returns the serial file itself then), or
+    None for any other ROM. Meant for the launch log and tray notice, so a
+    broken serial file is reported plainly instead of being handed to the
+    emulator, which only says "Invalid file or folder"."""
+    suffix = path.suffix.lower()
+    if suffix not in (PS3_SERIAL_EXTENSION, PS4_SERIAL_EXTENSION):
+        return None
+    serial = read_serial_file(path)
+    if serial is None:
+        example = "NPUA80472" if suffix == PS3_SERIAL_EXTENSION else "CUSA00900"
+        return f"{path.name} doesn't hold a serial like {example} on its first line"
+    if suffix == PS3_SERIAL_EXTENSION:
+        expected = Path(roms_dir) / "ps3" / "game" / serial / "USRDIR" / "EBOOT.BIN"
+    else:
+        expected = Path(roms_dir) / "ps4" / serial / "eboot.bin"
+    return f"{path.name} names {serial}, but no {expected} (or the other places it's looked for) exists"
 
 
 def build_pc_launch_args(profile: dict, executable: Path, rom_path: Path | None) -> list[str]:

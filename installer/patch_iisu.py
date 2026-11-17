@@ -40,6 +40,7 @@ those are now discovered at patch time too (find_asset_helper_class()).
 
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -468,6 +469,216 @@ def enable_large_heap(decompiled_dir: Path) -> bool:
     return True
 
 
+# The home screen's cover loader logs its queue as "inFlight=N pending=N
+# queued=N"; that string finds its (obfuscated) class in any iiSU build.
+BROWSER_LOADER_LOG_MARKER = '"inFlight="'
+# How many covers the home screen may decode at once. iiSU Alpha 7.5 allows 2.
+BROWSER_DECODE_PARALLELISM = 6
+
+# In the loader's dispatch method: the limit loaded into a register right
+# before it sizes the batch list (new ArrayList(limit)), then compared with
+# the in-flight set's size in the loop that starts loads.
+def _dispatch_limit(value: int) -> re.Pattern:
+    return re.compile(
+        rf"const/4 (v\d+), {hex(value)}(\s*(?:\.line \d+\s*)*)"
+        r"invoke-direct \{(v\d+), \1\}, Ljava/util/ArrayList;-><init>\(I\)V"
+    )
+
+
+# In the method that works out how many free slots are left: limit - in flight.
+def _free_slots(value: int) -> re.Pattern:
+    return re.compile(
+        r"(invoke-interface \{(v\d+)\}, Ljava/util/Set;->size\(\)I\s*(?:\.line \d+\s*)*move-result \2\s*(?:\.line \d+\s*)*)"
+        rf"rsub-int/lit8 \2, \2, {hex(value)}"
+    )
+
+
+def raise_browser_decode_parallelism(decompiled_dir: Path, limit: int = BROWSER_DECODE_PARALLELISM) -> bool:
+    """Lets the home screen decode more cover art at once.
+
+    iiSU's home-screen cover loader starts at most 2 decodes at a time. On a
+    big library at 4K that queues hundreds of covers whenever the list moves
+    (seen live: 300-580 pending, about 55 decoded per second, and the same
+    speed with 6 CPU cores as with the default), so covers scrolled into
+    view stay blank for seconds. Raising the limit lets the decodes use the
+    VM's other cores. Only the two places the limit appears are changed: the
+    dispatch loop and the free-slot count. If either can't be found exactly
+    once (a different iiSU build), nothing is changed and False is returned,
+    so an unfamiliar build is left working as iiSU shipped it."""
+    if not 2 < limit <= 7:  # const/4 holds -8..7
+        raise ValueError("limit must be 3 to 7")
+    candidates = [
+        path for path in decompiled_dir.rglob("*.smali")
+        if BROWSER_LOADER_LOG_MARKER in path.read_text(encoding="utf-8", errors="replace")
+    ]
+    if len(candidates) != 1:
+        print(f"[patch] WARNING: couldn't find iiSU's home-screen cover loader ({len(candidates)} matches), "
+              "leaving its decode limit as is.")
+        return False
+    path = candidates[0]
+    text = path.read_text(encoding="utf-8")
+    if len(_dispatch_limit(limit).findall(text)) == 1 and len(_free_slots(limit).findall(text)) == 1:
+        return False  # already raised (an APK that was patched before)
+    dispatch = list(_dispatch_limit(2).finditer(text))
+    free_slots = list(_free_slots(2).finditer(text))
+    if len(dispatch) != 1 or len(free_slots) != 1:
+        print(f"[patch] WARNING: {path.name}'s decode limit isn't where expected "
+              f"({len(dispatch)} dispatch, {len(free_slots)} free-slot matches), leaving it as is.")
+        return False
+    text = _dispatch_limit(2).sub(
+        lambda m: f"const/4 {m.group(1)}, {hex(limit)}{m.group(2)}invoke-direct {{{m.group(3)}, {m.group(1)}}}, "
+                  "Ljava/util/ArrayList;-><init>(I)V",
+        text,
+    )
+    text = _free_slots(2).sub(lambda m: f"{m.group(1)}rsub-int/lit8 {m.group(2)}, {m.group(2)}, {hex(limit)}", text)
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
+# How far beyond the screen the home screen's grids load covers ahead of time.
+BROWSER_PREFETCH_ROWS = 6        # uniform grids: rows above and below the screen (iiSU: 1)
+BROWSER_PREFETCH_SCREENS = 2.0   # free-form grids: screen lengths either side (iiSU: 1.0)
+
+_GAP = r"(?:\s*\.line \d+)*\s*"  # whitespace and apktool's .line markers between instructions
+# The tail of the uniform-grid branch of iiSU's window calculation (s13.W in
+# Alpha 7.5): overscanStart = (firstRow - 1) * columns, overscanEnd =
+# (lastRow + 2) * columns, i.e. one row of covers loaded beyond each edge.
+def _grid_overscan(start: str, end: str) -> re.Pattern:
+    """start: how the first overscan row is derived from the first visible row,
+    as a regex whose group 1 is that register; end: the rows added to the
+    last visible row for the end of the overscan (exclusive)."""
+    return re.compile(
+        rf"{start}{_GAP}mul-int/2addr \1, (v\d+){_GAP}if-gez \1, :(\w+){_GAP}goto :(\w+){_GAP}"
+        rf":\3{_GAP}move v\d+, \1{_GAP}:\4{_GAP}add-int/lit8 (v\d+), \5, {end}{_GAP}mul-int/2addr \5, \2"
+    )
+
+
+_GRID_OVERSCAN = _grid_overscan(r"sub-int/2addr (v\d+), v\d+", "0x2")
+# The free-form branch of the same method: margin = 1.0f * viewport length,
+# where the viewport length was just read from the layout's "a" field.
+_FREEFORM_MARGIN = re.compile(rf"(iget (v\d+), \2, L[\w/$]+;->a:F{_GAP})(mul-float/2addr (v\d+), \2)")
+
+
+def _float_bits(value: float) -> str:
+    """A float's bits as const/high16 wants them (only the top 16 bits may be set)."""
+    bits = struct.unpack(">I", struct.pack(">f", value))[0]
+    if bits & 0xFFFF:
+        raise ValueError(f"{value} can't be loaded with const/high16")
+    return hex(bits)
+
+
+def widen_browser_prefetch(
+    decompiled_dir: Path, rows: int = BROWSER_PREFETCH_ROWS, screens: float = BROWSER_PREFETCH_SCREENS
+) -> bool:
+    """Makes the home screen load covers further ahead of where you're looking.
+
+    iiSU's grid only asks for covers one row beyond the visible area (one
+    screen length for free-form layouts), so while scrolling, new covers are
+    requested only as they arrive and show blank until decoded. Asking for
+    `rows` rows (or `screens` screen lengths) beyond each edge starts them
+    decoding well before they come into view. Covers already in the cache
+    cost nothing, so this mainly moves work iiSU would do anyway earlier.
+
+    The method is found by its shape (the uniform-grid tail, matched exactly
+    once, in a method that also calls Math.floor and Math.ceil), since its
+    obfuscated name changes between iiSU builds. If it isn't found, nothing
+    changes and False is returned; an already-widened build is left alone
+    quietly."""
+    if not 1 < rows <= 7 or not 1.0 < screens <= 8.0:
+        raise ValueError("rows must be 2-7 and screens more than 1 and at most 8")
+    widened = _grid_overscan(rf"add-int/lit8 (v\d+), \1, -{hex(rows)}", hex(rows + 1))
+    matches, already = [], 0
+    for path in decompiled_dir.rglob("*.smali"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "Ljava/lang/Math;->floor(D)D" not in text:
+            continue
+        for method in re.finditer(r"^\.method [^\n]*\n.*?^\.end method", text, re.S | re.M):
+            body = method.group(0)
+            if "Ljava/lang/Math;->ceil(D)D" in body and "Ljava/lang/Math;->floor(D)D" in body:
+                matches.extend((path, method.start(), method.end(), m) for m in _GRID_OVERSCAN.finditer(body))
+                already += len(widened.findall(body))
+    if not matches and already == 1:
+        return False  # already widened (an APK that was patched before)
+    if len(matches) != 1:
+        print(f"[patch] WARNING: couldn't find iiSU's home-screen grid window ({len(matches)} matches), "
+              "leaving how far ahead it loads covers as is.")
+        return False
+    path, start, end, m = matches[0]
+    text = path.read_text(encoding="utf-8")
+    body = text[start:end]
+    start_reg, end_reg = m.group(1), m.group(5)
+    tail = m.group(0)
+    tail = re.sub(rf"^sub-int/2addr {start_reg}, v\d+",
+                  f"add-int/lit8 {start_reg}, {start_reg}, -{hex(rows)}", tail, count=1)
+    tail = tail.replace(f"add-int/lit8 {end_reg}, {end_reg}, 0x2", f"add-int/lit8 {end_reg}, {end_reg}, {hex(rows + 1)}", 1)
+    body = body[: m.start()] + tail + body[m.end():]
+
+    margins = list(_FREEFORM_MARGIN.finditer(body))
+    if len(margins) == 1:
+        mm = margins[0]
+        body = (body[: mm.start()] + mm.group(1)
+                + f"const/high16 {mm.group(4)}, {_float_bits(screens)}\n\n    "
+                + mm.group(3) + body[mm.end():])
+    else:
+        print(f"[patch] WARNING: {path.name}: free-form grid margin not found ({len(margins)} matches), "
+              "only uniform grids load further ahead.")
+    path.write_text(text[:start] + body + text[end:], encoding="utf-8")
+    return True
+
+
+# Share of iiSU's memory class its Coil image cache may use. iiSU uses 0.16.
+# Bitmap pixels live in native memory (Android 8+), so this doesn't eat into
+# the Java heap that largeHeap governs; 0.75 of 576 MB is about 430 MB.
+IMAGE_MEMORY_CACHE_SHARE = 0.75
+_APPLICATION_SMALI = "com/iisulauncher/LairLauncherApplication.smali"
+# newImageLoader: MemoryCache.Builder().maxSizePercent(share, context), the
+# share loaded as a double right before the call.
+_MEMORY_CACHE_SHARE = re.compile(
+    r"const-wide (v\d+), (0x[0-9a-f]+)L(?:\s*# [0-9.]+)?" + _GAP
+    + r"invoke-virtual \{(v\d+), \1, v\d+, (p\d+|v\d+)\}, L\w+;->\w+\(DLandroid/content/Context;\)V"
+)
+
+
+def _double_bits(value: float) -> str:
+    return hex(struct.unpack(">Q", struct.pack(">d", value))[0])
+
+
+def raise_image_memory_cache(decompiled_dir: Path, share: float = IMAGE_MEMORY_CACHE_SHARE) -> bool:
+    """Lets iiSU keep more decoded artwork in memory.
+
+    iiSU gives Coil, which draws the home screen's console pages, 16% of its
+    memory class for decoded images. With largeHeap that is about 92 MB, and
+    at 4K one console page's artwork alone is tens of MB, so paging back and
+    forth through a few consoles pushed the earlier pages out (seen live:
+    a page visited seconds before came back with blank tiles that popped in
+    a few hundred ms later). `share` of 576 MB keeps several pages resident.
+    At 0.35 the blank time halved (to 3-4 frames) but didn't go away; at 0.5
+    a sweep through all 43 consoles kept the last 5-7 pages drawn.
+
+    Only the one maxSizePercent(double, Context) call in iiSU's Application
+    class is changed, and only while it still holds iiSU's 0.16; anything
+    else is left as is."""
+    if not 0.16 < share <= 0.75:
+        raise ValueError("share must be above 0.16 and at most 0.75")
+    candidates = [p for p in decompiled_dir.glob(f"smali*/{_APPLICATION_SMALI}") if p.is_file()]
+    if len(candidates) != 1:
+        print("[patch] WARNING: couldn't find iiSU's Application class, leaving its image cache size as is.")
+        return False
+    path = candidates[0]
+    text = path.read_text(encoding="utf-8")
+    calls = list(_MEMORY_CACHE_SHARE.finditer(text))
+    original = [m for m in calls if m.group(2) == _double_bits(0.16)]
+    if not original and any(m.group(2) == _double_bits(share) for m in calls):
+        return False  # already raised
+    if len(original) != 1:
+        print(f"[patch] WARNING: iiSU's image cache size isn't where expected ({len(original)} matches), leaving it as is.")
+        return False
+    m = original[0]
+    start, end = m.span(2)
+    path.write_text(text[:start] + _double_bits(share) + text[end:], encoding="utf-8")
+    return True
+
+
 def zipalign(zipalign_exe: Path, unsigned_apk: Path, aligned_apk: Path) -> None:
     run([str(zipalign_exe), "-p", "-f", "4", str(unsigned_apk), str(aligned_apk)])
 
@@ -546,6 +757,12 @@ def patch_apk(
     fix_extract_native_libs(decompiled_dir)
     if enable_large_heap(decompiled_dir):
         print("[patch] enabled largeHeap so iiSU keeps more cover art in memory")
+    if raise_browser_decode_parallelism(decompiled_dir):
+        print(f"[patch] home screen now decodes up to {BROWSER_DECODE_PARALLELISM} covers at once (was 2)")
+    if widen_browser_prefetch(decompiled_dir):
+        print(f"[patch] home screen now loads covers {BROWSER_PREFETCH_ROWS} rows ahead (was 1)")
+    if raise_image_memory_cache(decompiled_dir):
+        print(f"[patch] iiSU's image memory cache raised to {IMAGE_MEMORY_CACHE_SHARE:.0%} of its memory (was 16%)")
 
     print("[patch] rebuilding...")
     build(decompiled_dir, unsigned_apk)

@@ -49,6 +49,13 @@ from collections import Counter
 # starting the game.
 CITRON_PRE_ARGS = ["-f", "-g"]
 
+# Flycast has no dedicated fullscreen flag; -config overrides one emu.cfg key
+# ([window] fullscreen) for this run only. Every route that ends in flycast.exe
+# needs it: the Flycast package, and RetroArch launches redirected to Flycast
+# by core (flycast_libretro) or by .cdi/.gdi extension, which used to pass no
+# arguments at all and opened Flycast in a small window.
+FLYCAST_PRE_ARGS = ["-config", "window:fullscreen=yes"]
+
 STANDALONE_DEFAULTS = [
     {
         "console": "psx",
@@ -167,7 +174,7 @@ STANDALONE_DEFAULTS = [
         # only lists -config section:key=value and -help), it's a transient
         # override of the same emu.cfg key its own [window] fullscreen
         # setting uses. Confirmed live via screenshot, no OS window border.
-        "pre_args": ["-config", "window:fullscreen=yes"],
+        "pre_args": FLYCAST_PRE_ARGS,
     },
     {
         "console": "ps3",
@@ -295,8 +302,8 @@ RETROARCH_SAFETY_NET_EXTENSIONS = {
     ".pbp": ("psx", ["duckstation-qt-x64-ReleaseLTCG.exe"], ["-fullscreen"]),
     ".chd": ("psx", ["duckstation-qt-x64-ReleaseLTCG.exe"], ["-fullscreen"]),
     ".m3u": ("psx", ["duckstation-qt-x64-ReleaseLTCG.exe"], ["-fullscreen"]),
-    ".cdi": ("dreamcast", ["flycast.exe"], []),
-    ".gdi": ("dreamcast", ["flycast.exe"], []),
+    ".cdi": ("dreamcast", ["flycast.exe"], FLYCAST_PRE_ARGS),
+    ".gdi": ("dreamcast", ["flycast.exe"], FLYCAST_PRE_ARGS),
 }
 
 RETROARCH_BY_EXTENSION = [
@@ -364,7 +371,18 @@ ANDROID_CORE_NAME_OVERRIDES = {
 # and wins outright, the same way an extension safety-net entry already
 # wins outright over the generic by-extension RetroArch guess.
 RETROARCH_CORE_OVERRIDES = {
-    "flycast_libretro.dll": ("dreamcast", ["flycast.exe"], []),
+    "flycast_libretro.dll": ("dreamcast", ["flycast.exe"], FLYCAST_PRE_ARGS),
+    # Not a real libretro core: the Atari Jaguar CD console added to iiSU's
+    # console list by hand launches RetroArch with LIBRETRO
+    # bigpemu_libretro_android.so purely so the bridge can route it here. BigPEmu runs Jaguar CD games (.cue/.cdi),
+    # which RetroArch's Virtual Jaguar core can't. It takes the game path as
+    # its only argument; fullscreen is BigPEmu's own setting.
+    "bigpemu_libretro.dll": ("atarijaguarcd", ["BigPEmu.exe", "bigpemu.exe"], []),
+    # Likewise for the hand-added PlayStation 4 console: its RetroArch entry
+    # names a "shadps4" core so the bridge can start shadPS4 with the game's
+    # eboot.bin (resolved from a .ps4 serial file, see emulator_lookup).
+    # shadPS4: -f true opens fullscreen, -g takes the game.
+    "shadps4_libretro.dll": ("ps4", ["shadPS4.exe", "shadps4.exe"], ["-f", "true", "-g"]),
 }
 
 

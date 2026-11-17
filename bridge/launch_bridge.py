@@ -78,6 +78,7 @@ from emulator_lookup import (
     friendly_emulator_name,
     load_path_cache,
     save_path_cache,
+    unresolved_serial_file_reason,
 )
 from hotkey_keys import MODIFIER_FLAGS, MODIFIER_VK, resolve_vk
 
@@ -1581,6 +1582,12 @@ def handle_request(raw_intent: str) -> None:
         rom_path = find_rom(rom_filename, roms_dir, path_cache)
         if rom_path is None:
             log_launch(f"FAILED: rom '{rom_filename}' not found under {roms_dir}", notify=True, notify_title=friendly_emulator_name(executable))
+        else:
+            serial_problem = unresolved_serial_file_reason(rom_path, roms_dir)
+            if serial_problem:
+                save_path_cache(path_cache)
+                log_launch(f"FAILED: {serial_problem}", notify=True, notify_title=friendly_emulator_name(executable))
+                return
 
     save_path_cache(path_cache)
 

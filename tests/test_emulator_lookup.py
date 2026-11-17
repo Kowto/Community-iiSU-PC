@@ -28,8 +28,11 @@ from emulator_lookup import (  # noqa: E402
     find_executable,
     find_rom,
     friendly_emulator_name,
+    read_serial_file,
+    unresolved_serial_file_reason,
     load_path_cache,
     resolve_ps3_serial_file,
+    resolve_ps4_serial_file,
     save_path_cache,
 )
 from shared.emulator_defaults import all_emulator_exe_names, build_emulators_map  # noqa: E402
@@ -243,6 +246,81 @@ class FindExecutableAndRomTests(unittest.TestCase):
         self.assertEqual(find_rom("Game.sfc", self.root, cache), moved)
 
 
+class Ps4SerialFileTests(unittest.TestCase):
+    """A .ps4 text file holding a dumped game's serial (the PlayStation 4
+    console added to iiSU by hand) launches that game's eboot.bin."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.print = patch("builtins.print").start()
+        self.addCleanup(patch.stopall)
+
+    def _eboot(self, *parts, name="eboot.bin"):
+        path = self.root.joinpath(*parts, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        return path
+
+    def _serial_file(self, serial, folder="ps4", name="Bloodborne.ps4"):
+        path = self.root / folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serial, encoding="utf-8")
+        return path
+
+    def test_the_game_folder_next_to_the_file_is_used(self):
+        eboot = self._eboot("ps4", "CUSA00900")
+        stub = self._serial_file("CUSA00900\r\n")
+        self.assertEqual(resolve_ps4_serial_file(stub, self.root), eboot)
+
+    def test_a_game_subfolder_and_an_upper_case_eboot_work(self):
+        eboot = self._eboot("ps4", "game", "CUSA00900", name="EBOOT.BIN")
+        stub = self._serial_file("CUSA00900")
+        self.assertEqual(resolve_ps4_serial_file(stub, self.root), eboot)
+
+    def test_a_file_in_a_subfolder_falls_back_to_roms_ps4(self):
+        eboot = self._eboot("ps4", "CUSA00900")
+        stub = self._serial_file("CUSA00900", folder="ps4/Action")
+        self.assertEqual(resolve_ps4_serial_file(stub, self.root), eboot)
+
+    def test_find_rom_returns_the_eboot(self):
+        eboot = self._eboot("ps4", "CUSA00900")
+        self._serial_file("CUSA00900")
+        self.assertEqual(find_rom("Bloodborne.ps4", self.root, {"roms": {}}), eboot)
+
+    def test_a_missing_game_or_odd_contents_leave_the_file_unchanged(self):
+        for contents in ("CUSA99999", "", "../x", "C:\\x"):
+            with self.subTest(contents=contents):
+                stub = self._serial_file(contents)
+                self.assertEqual(resolve_ps4_serial_file(stub, self.root), stub)
+
+    def test_ps4_launches_go_to_shadps4_fullscreen(self):
+        profile = find_emulator_for_package(
+            "com.retroarch", build_emulators_map(), "Bloodborne.ps4", "shadps4_libretro_android.so")
+        self.assertEqual(profile, {"exe_names": ["shadPS4.exe", "shadps4.exe"], "pre_args": ["-f", "true", "-g"]})
+
+
+class JaguarCdRoutingTests(unittest.TestCase):
+    """The Atari Jaguar CD console offers BigPEmu (a made-up "bigpemu" core)
+    and RetroArch's Virtual Jaguar; each choice launches what it says."""
+
+    def setUp(self):
+        self.emulators = build_emulators_map()
+
+    def test_the_bigpemu_choice_launches_bigpemu(self):
+        profile = find_emulator_for_package("com.retroarch", self.emulators, "Myst (USA).cue", "bigpemu_libretro_android.so")
+        self.assertEqual(profile["exe_names"], ["BigPEmu.exe", "bigpemu.exe"])
+
+    def test_the_virtual_jaguar_choice_stays_in_retroarch_for_cd_games_too(self):
+        # for RetroAchievements, which BigPEmu doesn't support
+        for rom in ("Battlemorph (World).cue", "Myst (USA).cdi", "Blue Lightning.chd", "Tempest 2000.j64"):
+            with self.subTest(rom=rom):
+                profile = find_emulator_for_package(
+                    "com.retroarch", self.emulators, rom, "virtualjaguar_libretro_android.so")
+                self.assertEqual(profile["exe_names"], ["retroarch.exe"])
+                self.assertIn("cores/virtualjaguar_libretro.dll", profile["pre_args"])
+
+
 class Ps3SerialFileTests(unittest.TestCase):
     """A .ps3 text file holding a PSN/HDD game's serial stands in for the
     game folder in iiSU; the bridge launches that game's EBOOT.BIN."""
@@ -292,6 +370,45 @@ class Ps3SerialFileTests(unittest.TestCase):
             with self.subTest(contents=contents):
                 stub = self._serial_file(contents)
                 self.assertEqual(resolve_ps3_serial_file(stub, self.root), stub)
+
+    def test_files_saved_by_windows_tools_still_resolve(self):
+        eboot = self._eboot("ps3", "game", "NPUA80472")
+        stub = self.root / "ps3" / "LittleBigPlanet.ps3"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        for label, data in (
+            ("utf-8 bom", b"\xef\xbb\xbfNPUA80472\r\n"),
+            ("powershell utf-16", "\ufeffNPUA80472\r\n".encode("utf-16-le")),
+            ("quoted", b'"NPUA80472"'),
+            ("second line ignored", b"NPUA80472\nLittleBigPlanet\n"),
+        ):
+            with self.subTest(label):
+                stub.write_bytes(data)
+                self.assertEqual(read_serial_file(stub), "NPUA80472")
+                self.assertEqual(resolve_ps3_serial_file(stub, self.root), eboot)
+
+    def test_an_rpcs3_dev_hdd0_layout_resolves(self):
+        eboot = self._eboot("ps3", "dev_hdd0", "game", "NPUA80472")
+        stub = self._serial_file("NPUA80472")
+        self.assertEqual(resolve_ps3_serial_file(stub, self.root), eboot)
+
+    def test_a_failed_lookup_is_not_cached_and_a_stale_one_is_ignored(self):
+        stub = self._serial_file("NPUA80472")
+        cache = {"roms": {}}
+        self.assertEqual(find_rom("LittleBigPlanet.ps3", self.root, cache), stub)
+        self.assertEqual(cache["roms"], {})
+        # What an older bridge left behind after a failed lookup.
+        cache["roms"][f"LittleBigPlanet.ps3::{self.root}"] = str(stub)
+        eboot = self._eboot("ps3", "game", "NPUA80472")
+        self.assertEqual(find_rom("LittleBigPlanet.ps3", self.root, cache), eboot)
+
+    def test_the_reason_names_the_serial_and_the_expected_folder(self):
+        stub = self._serial_file("NPUA80472")
+        reason = unresolved_serial_file_reason(stub, self.root)
+        self.assertIn("NPUA80472", reason)
+        self.assertIn("EBOOT.BIN", reason)
+        stub.write_bytes(b"\0" * 4096)
+        self.assertIn("doesn't hold a serial", unresolved_serial_file_reason(stub, self.root))
+        self.assertIsNone(unresolved_serial_file_reason(self.root / "ps3" / "Game.iso", self.root))
 
     def test_other_files_are_untouched(self):
         iso = self.root / "ps3" / "Game.iso"
