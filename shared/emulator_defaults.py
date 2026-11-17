@@ -372,12 +372,17 @@ ANDROID_CORE_NAME_OVERRIDES = {
 # wins outright over the generic by-extension RetroArch guess.
 RETROARCH_CORE_OVERRIDES = {
     "flycast_libretro.dll": ("dreamcast", ["flycast.exe"], FLYCAST_PRE_ARGS),
-    # Not a real libretro core: the hand-added "Atari Jaguar CD" iiSU tab
-    # launches RetroArch with LIBRETRO bigpemu_libretro_android.so purely so
-    # the bridge can route it here. BigPEmu runs Jaguar CD games (.cue/.cdi),
+    # Not a real libretro core: the Atari Jaguar CD console added to iiSU's
+    # console list by hand launches RetroArch with LIBRETRO
+    # bigpemu_libretro_android.so purely so the bridge can route it here. BigPEmu runs Jaguar CD games (.cue/.cdi),
     # which RetroArch's Virtual Jaguar core can't. It takes the game path as
     # its only argument; fullscreen is BigPEmu's own setting.
     "bigpemu_libretro.dll": ("atarijaguarcd", ["BigPEmu.exe", "bigpemu.exe"], []),
+    # Likewise for the hand-added PlayStation 4 console: its RetroArch entry
+    # names a "shadps4" core so the bridge can start shadPS4 with the game's
+    # eboot.bin (resolved from a .ps4 serial file, see emulator_lookup).
+    # shadPS4: -f true opens fullscreen, -g takes the game.
+    "shadps4_libretro.dll": ("ps4", ["shadPS4.exe", "shadps4.exe"], ["-f", "true", "-g"]),
 }
 
 

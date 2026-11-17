@@ -35,6 +35,12 @@ class ResolveConsoleShortnameTests(unittest.TestCase):
         self.assertEqual(self.resolve("atarijaguar"), "atarijaguar")
         self.assertEqual(self.resolve("Atari Jaguar"), "atarijaguar")
 
+    def test_hand_added_playstation_consoles_get_their_own_folders(self):
+        for name, short in (("ps4", "ps4"), ("PlayStation 4", "ps4"), ("Sony PlayStation 4", "ps4"),
+                            ("ps5", "ps5"), ("PlayStation 5", "ps5"), ("PlayStation 3", "ps3")):
+            with self.subTest(name=name):
+                self.assertEqual(self.resolve(name), short)
+
     def test_case_insensitive(self):
         self.assertEqual(self.resolve("PLAYSTATION 1"), "psx")
 

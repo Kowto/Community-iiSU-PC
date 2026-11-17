@@ -30,6 +30,7 @@ from emulator_lookup import (  # noqa: E402
     friendly_emulator_name,
     load_path_cache,
     resolve_ps3_serial_file,
+    resolve_ps4_serial_file,
     save_path_cache,
 )
 from shared.emulator_defaults import all_emulator_exe_names, build_emulators_map  # noqa: E402
@@ -241,6 +242,60 @@ class FindExecutableAndRomTests(unittest.TestCase):
         old.unlink()
         moved = self._touch("b", "Game.sfc")
         self.assertEqual(find_rom("Game.sfc", self.root, cache), moved)
+
+
+class Ps4SerialFileTests(unittest.TestCase):
+    """A .ps4 text file holding a dumped game's serial (the PlayStation 4
+    console added to iiSU by hand) launches that game's eboot.bin."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.print = patch("builtins.print").start()
+        self.addCleanup(patch.stopall)
+
+    def _eboot(self, *parts, name="eboot.bin"):
+        path = self.root.joinpath(*parts, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        return path
+
+    def _serial_file(self, serial, folder="ps4", name="Bloodborne.ps4"):
+        path = self.root / folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serial, encoding="utf-8")
+        return path
+
+    def test_the_game_folder_next_to_the_file_is_used(self):
+        eboot = self._eboot("ps4", "CUSA00900")
+        stub = self._serial_file("CUSA00900\r\n")
+        self.assertEqual(resolve_ps4_serial_file(stub, self.root), eboot)
+
+    def test_a_game_subfolder_and_an_upper_case_eboot_work(self):
+        eboot = self._eboot("ps4", "game", "CUSA00900", name="EBOOT.BIN")
+        stub = self._serial_file("CUSA00900")
+        self.assertEqual(resolve_ps4_serial_file(stub, self.root), eboot)
+
+    def test_a_file_in_a_subfolder_falls_back_to_roms_ps4(self):
+        eboot = self._eboot("ps4", "CUSA00900")
+        stub = self._serial_file("CUSA00900", folder="ps4/Action")
+        self.assertEqual(resolve_ps4_serial_file(stub, self.root), eboot)
+
+    def test_find_rom_returns_the_eboot(self):
+        eboot = self._eboot("ps4", "CUSA00900")
+        self._serial_file("CUSA00900")
+        self.assertEqual(find_rom("Bloodborne.ps4", self.root, {"roms": {}}), eboot)
+
+    def test_a_missing_game_or_odd_contents_leave_the_file_unchanged(self):
+        for contents in ("CUSA99999", "", "../x", "C:\\x"):
+            with self.subTest(contents=contents):
+                stub = self._serial_file(contents)
+                self.assertEqual(resolve_ps4_serial_file(stub, self.root), stub)
+
+    def test_ps4_launches_go_to_shadps4_fullscreen(self):
+        profile = find_emulator_for_package(
+            "com.retroarch", build_emulators_map(), "Bloodborne.ps4", "shadps4_libretro_android.so")
+        self.assertEqual(profile, {"exe_names": ["shadPS4.exe", "shadps4.exe"], "pre_args": ["-f", "true", "-g"]})
 
 
 class JaguarCdRoutingTests(unittest.TestCase):

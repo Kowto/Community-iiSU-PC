@@ -151,7 +151,7 @@ def find_rom(rom_filename: str, roms_dir: Path, cache: dict) -> Path | None:
         return None
     match = _find_by_name(roms_dir, {rom_filename}, ROM_SEARCH_MAX_DEPTH)
     if match:
-        match = resolve_ps3_serial_file(match, roms_dir)
+        match = resolve_ps4_serial_file(resolve_ps3_serial_file(match, roms_dir), roms_dir)
         cache["roms"][cache_key] = str(match)
         return match
     cache["roms"].pop(cache_key, None)
@@ -183,6 +183,35 @@ def resolve_ps3_serial_file(path: Path, roms_dir: Path) -> Path:
         if eboot.is_file():
             return eboot
     print(f"[bridge] PS3 game {serial} (from {path.name}) not found under {path.parent / 'game'}")
+    return path
+
+
+PS4_SERIAL_EXTENSION = ".ps4"
+
+
+def resolve_ps4_serial_file(path: Path, roms_dir: Path) -> Path:
+    """The PS4 counterpart of resolve_ps3_serial_file, for the PlayStation 4
+    console added to iiSU's console list by hand: a <name>.ps4 text file
+    holding the game's serial (CUSA00001) stands in for the dumped game
+    folder, and is swapped for <serial>/eboot.bin, the file shadPS4 boots.
+    The folder is looked for next to the .ps4 file, in a game subfolder
+    there, then in <roms_dir>/ps4 and <roms_dir>/ps4/game. Anything else
+    comes back unchanged."""
+    if path.suffix.lower() != PS4_SERIAL_EXTENSION:
+        return path
+    try:
+        serial = path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return path
+    if not serial or any(c in serial for c in "/\\:\n"):
+        return path
+    ps4_dir = Path(roms_dir) / "ps4"
+    for game_dir in (path.parent, path.parent / "game", ps4_dir, ps4_dir / "game"):
+        for name in ("eboot.bin", "EBOOT.BIN"):
+            eboot = game_dir / serial / name
+            if eboot.is_file():
+                return eboot
+    print(f"[bridge] PS4 game {serial} (from {path.name}) not found next to it or under {ps4_dir}")
     return path
 
 
