@@ -249,3 +249,37 @@ class SerialFileContentsTests(unittest.TestCase):
             self.assertEqual(tar.extractfile("Roms/ps3/LittleBigPlanet.ps3").read(), b"NPUA80472")
             other = tar.extractfile("Roms/ps3/Other.iso").read()
         self.assertEqual(other, b"\0" * (sync_library.PLACEHOLDER_SIZE_KB * 1024))
+
+
+class InstalledGameFolderTests(unittest.TestCase):
+    """PS3/PS4/PS5 game folders stay on the PC; only what iiSU lists syncs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exact, cls.by_compact = load_console_lookup()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.roms = Path(self.tmp.name)
+        for rel in (
+            "ps3/LittleBigPlanet.ps3",
+            "ps3/Disc Game.iso",
+            "ps3/game/NPUA80472/USRDIR/EBOOT.BIN",
+            "ps3/game/NPUA80472/USRDIR/gamedata/voiceover",
+            "ps4/Bloodborne.ps4",
+            "ps4/CUSA00900/eboot.bin",
+            "ps4/CUSA00900-patch/sce_sys/param.sfo",
+            "ps4/addcont/CUSA00900/ac.pkg",
+            "psp/Game.cso",
+        ):
+            path = self.roms / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+
+    def test_only_listable_files_are_synced_for_those_consoles(self):
+        consoles, skipped = scan_library(self.roms, self.exact, self.by_compact, dedupe_exceptions=set())
+        self.assertEqual(skipped, [])
+        self.assertEqual([rel for rel, *_ in consoles["ps3"]], ["Disc Game.iso", "LittleBigPlanet.ps3"])
+        self.assertEqual([rel for rel, *_ in consoles["ps4"]], ["Bloodborne.ps4"])
+        self.assertEqual([rel for rel, *_ in consoles["psp"]], ["Game.cso"])

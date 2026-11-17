@@ -93,6 +93,17 @@ SERIAL_FILE_CONSOLES = {"ps3", "ps4", "ps5"}
 SERIAL_FILE_EXTENSIONS = {".ps3", ".ps4", ".ps5"}
 SERIAL_FILE_MAX_BYTES = 256
 
+# Consoles whose games are installed folders of thousands of files (a PS3
+# game/<serial>/USRDIR tree, a PS4 CUSA00900 dump with its -patch and
+# addcont folders). iiSU only ever lists the extensions below for them, so
+# everything else stays on the PC instead of becoming a placeholder each:
+# LittleBigPlanet alone added ~5,000 to the AVD and the Games page.
+LISTED_EXTENSIONS_ONLY = {
+    "ps3": {".iso", ".ps3"},
+    "ps4": {".ps4"},
+    "ps5": {".ps5"},
+}
+
 CUE_FILE_LINE = re.compile(r'^\s*FILE\s+"([^"]+)"', re.IGNORECASE)
 
 
@@ -233,8 +244,11 @@ def scan_library(
             skipped.append(console_folder.name)
             continue
 
+        listed_only = LISTED_EXTENSIONS_ONLY.get(shortname)
         by_directory: dict[Path, list[Path]] = {}
         for file_path in console_folder.rglob("*"):
+            if listed_only is not None and file_path.suffix.lower() not in listed_only:
+                continue
             if file_path.is_dir():
                 continue
             by_directory.setdefault(file_path.parent, []).append(file_path)
