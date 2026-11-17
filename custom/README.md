@@ -24,3 +24,13 @@ Each launches RetroArch with a made-up core name (`bigpemu`, `shadps4`, `ps5`)
 that the launch bridge turns into the PC emulator. iiSU replaces the device
 copy when an iiSU update ships a newer console list (emuladores.version.txt),
 so these entries then need adding again.
+
+The border pack needs the same three consoles, in
+`/sdcard/Android/media/com.iisulauncher/iiSULauncher/assets/border_packs/default/border_pack.json`
+(images go in the same folder):
+
+```json
+{ "console": "atarijaguarcd", "border": "atarijaguarcd.png" , "logo": "logo_atarijaguar.png" },
+{ "console": "ps4", "border": "ps4.png" , "logo": "logo_ps4.png" },
+{ "console": "ps5", "border": "ps5.png" , "logo": "logo_ps5.png" },
+```
