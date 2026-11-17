@@ -243,6 +243,33 @@ class FindExecutableAndRomTests(unittest.TestCase):
         self.assertEqual(find_rom("Game.sfc", self.root, cache), moved)
 
 
+class JaguarCdRoutingTests(unittest.TestCase):
+    """iiSU's Atari Jaguar tab launches RetroArch's Virtual Jaguar core,
+    which can't run Jaguar CD games; those go to BigPEmu instead."""
+
+    def setUp(self):
+        self.emulators = build_emulators_map()
+
+    def _route(self, rom):
+        return find_emulator_for_package("com.retroarch", self.emulators, rom, "virtualjaguar_libretro_android.so")
+
+    def test_cd_images_go_to_bigpemu(self):
+        for rom in ("Battlemorph (World).cue", "Myst (USA).CDI"):
+            with self.subTest(rom=rom):
+                self.assertEqual(self._route(rom)["exe_names"], ["BigPEmu.exe", "bigpemu.exe"])
+
+    def test_cartridges_stay_in_retroarch(self):
+        for rom in ("Tempest 2000 (World).j64", "Alien vs Predator.jag", "Doom.zip"):
+            with self.subTest(rom=rom):
+                profile = self._route(rom)
+                self.assertEqual(profile["exe_names"], ["retroarch.exe"])
+                self.assertIn("cores/virtualjaguar_libretro.dll", profile["pre_args"])
+
+    def test_other_cores_with_cue_files_are_unaffected(self):
+        profile = find_emulator_for_package("com.retroarch", self.emulators, "Game.cue", "swanstation_libretro_android.so")
+        self.assertEqual(profile["exe_names"], ["retroarch.exe"])
+
+
 class Ps3SerialFileTests(unittest.TestCase):
     """A .ps3 text file holding a PSN/HDD game's serial stands in for the
     game folder in iiSU; the bridge launches that game's EBOOT.BIN."""

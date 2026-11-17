@@ -254,7 +254,7 @@ def find_emulator_for_package(package: str, emulators: dict, rom_filename: str |
             if android_core:
                 core_dll = retroarch_core_dll_for_android_core(android_core)
                 if core_dll:
-                    override = standalone_profile_for_core_dll(core_dll)
+                    override = standalone_profile_for_core_dll(core_dll, rom_filename)
                     if override:
                         return override
                     return {"exe_names": ["retroarch.exe"], "pre_args": ["-L", f"cores/{core_dll}", "-f"]}

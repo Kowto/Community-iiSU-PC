@@ -381,6 +381,18 @@ RETROARCH_CORE_OVERRIDES = {
 }
 
 
+# Like RETROARCH_CORE_OVERRIDES, but only for some file types: the core
+# iiSU picked can't run that kind of file at all, so a standalone emulator
+# that can takes over. Virtual Jaguar (iiSU's RetroArch core for the Atari
+# Jaguar tab) has no Jaguar CD support, but iiSU's Jaguar tab lists .cue
+# and .cdi, so Jaguar CD games sent to it go to BigPEmu instead; cartridge
+# games (.j64, .jag, ...) still run in RetroArch.
+RETROARCH_CORE_EXTENSION_OVERRIDES = {
+    ("virtualjaguar_libretro.dll", ".cue"): ("atarijaguarcd", ["BigPEmu.exe", "bigpemu.exe"], []),
+    ("virtualjaguar_libretro.dll", ".cdi"): ("atarijaguarcd", ["BigPEmu.exe", "bigpemu.exe"], []),
+}
+
+
 def retroarch_core_dll_for_android_core(android_core_filename: str) -> str | None:
     """Translates the Android libretro core .so filename iiSU/RetroArch
     itself reports launching (the LIBRETRO intent extra) into the matching
@@ -405,12 +417,19 @@ def retroarch_core_dll_for_android_core(android_core_filename: str) -> str | Non
     return f"{core_name}_libretro.dll"
 
 
-def standalone_profile_for_core_dll(core_dll: str) -> dict | None:
+def standalone_profile_for_core_dll(core_dll: str, rom_filename: str | None = None) -> dict | None:
     """The dedicated-emulator profile for a resolved Windows core dll, per
-    RETROARCH_CORE_OVERRIDES, in the same {exe_names, pre_args} shape as
-    any other emulators-map entry, or None if this core has no dedicated
-    override (the ordinary by-extension guess applies instead)."""
-    override = RETROARCH_CORE_OVERRIDES.get(core_dll)
+    RETROARCH_CORE_EXTENSION_OVERRIDES (for that core and the ROM's file
+    type) or else RETROARCH_CORE_OVERRIDES, in the same {exe_names,
+    pre_args} shape as any other emulators-map entry, or None if this core
+    has no dedicated override (the ordinary by-extension guess applies
+    instead)."""
+    override = None
+    if rom_filename:
+        ext = "." + rom_filename.rsplit(".", 1)[-1].lower() if "." in rom_filename else ""
+        override = RETROARCH_CORE_EXTENSION_OVERRIDES.get((core_dll, ext))
+    if override is None:
+        override = RETROARCH_CORE_OVERRIDES.get(core_dll)
     if override is None:
         return None
     _console, exe_names, pre_args = override
