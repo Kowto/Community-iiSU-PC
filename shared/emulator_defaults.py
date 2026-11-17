@@ -372,6 +372,12 @@ ANDROID_CORE_NAME_OVERRIDES = {
 # wins outright over the generic by-extension RetroArch guess.
 RETROARCH_CORE_OVERRIDES = {
     "flycast_libretro.dll": ("dreamcast", ["flycast.exe"], FLYCAST_PRE_ARGS),
+    # Not a real libretro core: the hand-added "Atari Jaguar CD" iiSU tab
+    # launches RetroArch with LIBRETRO bigpemu_libretro_android.so purely so
+    # the bridge can route it here. BigPEmu runs Jaguar CD games (.cue/.cdi),
+    # which RetroArch's Virtual Jaguar core can't. It takes the game path as
+    # its only argument; fullscreen is BigPEmu's own setting.
+    "bigpemu_libretro.dll": ("atarijaguarcd", ["BigPEmu.exe", "bigpemu.exe"], []),
 }
 
 

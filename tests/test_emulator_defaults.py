@@ -156,6 +156,12 @@ class RetroarchCoreTranslationTests(unittest.TestCase):
         self.assertIn("flycast.exe", override["exe_names"])
 
 
+    def test_the_jaguar_cd_tab_routes_to_bigpemu(self):
+        core_dll = retroarch_core_dll_for_android_core("bigpemu_libretro_android.so")
+        self.assertEqual(core_dll, "bigpemu_libretro.dll")
+        override = standalone_profile_for_core_dll(core_dll)
+        self.assertEqual(override, {"exe_names": ["BigPEmu.exe", "bigpemu.exe"], "pre_args": []})
+
     def test_every_route_to_flycast_opens_it_fullscreen(self):
         """Dreamcast games launched through iiSU's RetroArch option reach Flycast by
         core or by extension; those used to pass no flags and opened a small window."""

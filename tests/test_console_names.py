@@ -26,6 +26,15 @@ class ResolveConsoleShortnameTests(unittest.TestCase):
         self.assertEqual(self.resolve("Playstation 1"), "psx")
         self.assertEqual(self.resolve("Playstation 2"), "ps2")
 
+    def test_jaguar_cd_folders_stay_separate_from_the_jaguar(self):
+        # Without the override, "atarijaguarcd" substring-matched "atarijaguar"
+        # and its games landed in the Atari Jaguar tab's folder.
+        for name in ("atarijaguarcd", "Atari Jaguar CD", "jaguarcd", "Jaguar CD"):
+            with self.subTest(name=name):
+                self.assertEqual(self.resolve(name), "atarijaguarcd")
+        self.assertEqual(self.resolve("atarijaguar"), "atarijaguar")
+        self.assertEqual(self.resolve("Atari Jaguar"), "atarijaguar")
+
     def test_case_insensitive(self):
         self.assertEqual(self.resolve("PLAYSTATION 1"), "psx")
 

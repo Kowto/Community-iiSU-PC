@@ -22,6 +22,14 @@ NAME_OVERRIDES = {
     "playstation 3": "ps3",
     "playstation portable": "psp",
     "sega megadrive (genesis)": "genesis",
+    # Not a console iiSU knows: Jaguar CD games get their own folder (and a
+    # hand-added "Atari Jaguar CD" tab pointing at Roms/atarijaguarcd) rather
+    # than falling into the substring match below, which would put them in
+    # the Atari Jaguar folder.
+    "atarijaguarcd": "atarijaguarcd",
+    "atari jaguar cd": "atarijaguarcd",
+    "jaguarcd": "atarijaguarcd",
+    "jaguar cd": "atarijaguarcd",
 }
 
 
