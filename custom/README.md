@@ -16,7 +16,7 @@ list, which iiSU reads from the VM at
 `/sdcard/Android/media/com.iisulauncher/iiSULauncher/Emuladores/emuladores.json`
 (a copy of the APK's `emuladores_default.json`, made on first start):
 
-- **Atari Jaguar CD** (`atarijaguarcd`): `.cue`/`.cdi`, launched with BigPEmu.
+- **Atari Jaguar CD** (`atarijaguarcd`): `.cue`/`.cdi`/`.chd`, launched with BigPEmu.
 - **Sony PlayStation 4** (`ps4`): `.ps4` serial files, launched with shadPS4.
 - **Sony PlayStation 5** (`ps5`): `.ps5` files; no PC emulator yet.
 

@@ -14,6 +14,8 @@
       "romExtensions": [
         ".cdi",
         ".CDI",
+        ".chd",
+        ".CHD",
         ".cue",
         ".CUE"
       ],
