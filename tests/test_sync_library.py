@@ -15,7 +15,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "bridge"))
 
 import sync_library
 from console_names import load_console_lookup
-from sync_library import merge_windows_stubs, referenced_disc_filenames, scan_library
+from sync_library import (
+    build_placeholder_tar,
+    collect_serial_file_contents,
+    merge_windows_stubs,
+    referenced_disc_filenames,
+    scan_library,
+)
 
 
 
@@ -196,3 +202,50 @@ class MergeWindowsStubsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SerialFileContentsTests(unittest.TestCase):
+    """PS3/PS4 serial files reach the AVD with their real contents; iiSU's
+    PS3 launch reads the serial out of the file."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exact, cls.by_compact = load_console_lookup()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.roms = Path(self.tmp.name)
+
+    def _write(self, rel, data):
+        path = self.roms / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def test_serial_files_are_collected_and_nothing_else(self):
+        self._write("ps3/LittleBigPlanet.ps3", b"NPUA80472")
+        self._write("ps3/game/NPUA80472/USRDIR/EBOOT.BIN", b"x" * 10)
+        self._write("ps4/Bloodborne.ps4", b"CUSA00900\n")
+        self._write("ps4/CUSA00900/eboot.bin", b"x")
+        self._write("ps4/Huge.ps4", b"x" * 1000)
+        self._write("nes/Game.ps3", b"NOT-A-PS3-FOLDER")
+        contents = collect_serial_file_contents(self.roms, self.exact, self.by_compact)
+        self.assertEqual(contents, {
+            ("ps3", "LittleBigPlanet.ps3"): b"NPUA80472",
+            ("ps4", "Bloodborne.ps4"): b"CUSA00900\n",
+        })
+
+    def test_the_archive_carries_them_and_placeholders_for_the_rest(self):
+        import tarfile
+        self._write("ps3/LittleBigPlanet.ps3", b"NPUA80472")
+        self._write("ps3/Other.iso", b"x" * 10)
+        consoles, _ = scan_library(self.roms, self.exact, self.by_compact, dedupe_exceptions=set())
+        contents = collect_serial_file_contents(self.roms, self.exact, self.by_compact)
+        out_dir = Path(self.tmp.name) / "out"
+        out_dir.mkdir()
+        with patch.object(sync_library, "__file__", str(out_dir / "sync_library.py")):
+            tar_path = build_placeholder_tar(consoles, "fp", contents)
+        with tarfile.open(tar_path) as tar:
+            self.assertEqual(tar.extractfile("Roms/ps3/LittleBigPlanet.ps3").read(), b"NPUA80472")
+            other = tar.extractfile("Roms/ps3/Other.iso").read()
+        self.assertEqual(other, b"\0" * (sync_library.PLACEHOLDER_SIZE_KB * 1024))

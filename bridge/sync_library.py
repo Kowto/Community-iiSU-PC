@@ -83,6 +83,16 @@ IGNORE_TOP_LEVEL = {"folder.ico", "sync.ffs_lock"}
 # untouched, the emulator still finds it right where it always was.
 NEVER_PLACEHOLDER_EXTENSIONS = {".sbi"}
 
+# Small text files holding a game's serial, standing in for a PS3/PS4/PS5
+# game folder (see emulator_lookup.resolve_ps3_serial_file). These get their
+# real contents in the AVD instead of a zero-filled placeholder: iiSU's own
+# PS3 launch command reads the file (%ROM_CONTENT%) to get the serial, so a
+# placeholder broke every PS3 launch after a resync, and a hand-pushed copy
+# was wiped by the next one.
+SERIAL_FILE_CONSOLES = {"ps3", "ps4", "ps5"}
+SERIAL_FILE_EXTENSIONS = {".ps3", ".ps4", ".ps5"}
+SERIAL_FILE_MAX_BYTES = 256
+
 CUE_FILE_LINE = re.compile(r'^\s*FILE\s+"([^"]+)"', re.IGNORECASE)
 
 
@@ -248,6 +258,31 @@ def scan_library(
     return consoles, skipped
 
 
+def collect_serial_file_contents(roms_dir: Path, exact: dict, by_compact: dict) -> dict[tuple[str, str], bytes]:
+    """{(iiSU short name, path relative to that console folder): contents}
+    for every serial file (SERIAL_FILE_EXTENSIONS, at most
+    SERIAL_FILE_MAX_BYTES) in the PS3/PS4/PS5 folders, the same keys
+    scan_library's entries use. Only those consoles' folders are walked."""
+    contents: dict[tuple[str, str], bytes] = {}
+    for console_folder in sorted(roms_dir.iterdir()):
+        if not console_folder.is_dir():
+            continue
+        shortname = resolve_console_shortname(console_folder.name, exact, by_compact)
+        if shortname not in SERIAL_FILE_CONSOLES:
+            continue
+        for file_path in console_folder.rglob("*"):
+            if file_path.suffix.lower() not in SERIAL_FILE_EXTENSIONS or not file_path.is_file():
+                continue
+            try:
+                if file_path.stat().st_size > SERIAL_FILE_MAX_BYTES:
+                    continue
+                data = file_path.read_bytes()
+            except OSError:
+                continue
+            contents[(shortname, file_path.relative_to(console_folder).as_posix())] = data
+    return contents
+
+
 def scan_windows_stubs() -> list[tuple[str, int, int]]:
     """Windows Apps' .pcgame placeholders live in the install directory
     (see WINDOWS_STUBS_DIR in windows_apps_service.py), not under roms_dir, so they
@@ -315,21 +350,28 @@ def wait_for_external_storage(timeout: float = 60.0) -> bool:
     return status == 0
 
 
-def build_placeholder_tar(consoles: dict[str, list[tuple[str, int, int]]], current_fingerprint: str) -> Path:
+def build_placeholder_tar(
+    consoles: dict[str, list[tuple[str, int, int]]],
+    current_fingerprint: str,
+    real_contents: dict[tuple[str, str], bytes] | None = None,
+) -> Path:
     """Builds one local tar archive holding every placeholder file (plus the
     fingerprint file) with paths already relative to /sdcard, so extracting
     it there with a plain `tar xf` recreates the whole Roms/ tree, tar
     creates whatever parent directories a member needs, so nothing here has
     to mkdir anything up front. All of this is local disk I/O; nothing here
-    talks to the device."""
+    talks to the device. Files in real_contents (serial files, see
+    collect_serial_file_contents) get their actual contents instead."""
     placeholder = b"\0" * (PLACEHOLDER_SIZE_KB * 1024)
+    real_contents = real_contents or {}
     tar_path = Path(__file__).parent / "_sync_tmp.tar"
     with tarfile.open(tar_path, "w") as tar:
         for shortname, entries in consoles.items():
             for rel, _size, _mtime in entries:
+                data = real_contents.get((shortname, rel), placeholder)
                 info = tarfile.TarInfo(name=f"{AVD_ROMS_DIRNAME}/{shortname}/{rel}")
-                info.size = len(placeholder)
-                tar.addfile(info, io.BytesIO(placeholder))
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
         fingerprint_bytes = current_fingerprint.encode("utf-8")
         info = tarfile.TarInfo(name=f"{AVD_ROMS_DIRNAME}/{FINGERPRINT_NAME}")
         info.size = len(fingerprint_bytes)
@@ -370,7 +412,9 @@ def main() -> None:
         return
 
     print(f"Building one archive for {len(consoles)} console folder(s), {file_count} placeholder file(s)...")
-    tar_path = build_placeholder_tar(consoles, current_fingerprint)
+    tar_path = build_placeholder_tar(
+        consoles, current_fingerprint, collect_serial_file_contents(roms_dir, exact, by_compact)
+    )
 
     push_size_mb = tar_path.stat().st_size / 1e6
     print(f"Pushing the archive ({push_size_mb:.1f} MB) to the AVD and extracting it in one shot...")
