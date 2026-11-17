@@ -299,30 +299,24 @@ class Ps4SerialFileTests(unittest.TestCase):
 
 
 class JaguarCdRoutingTests(unittest.TestCase):
-    """iiSU's Atari Jaguar tab launches RetroArch's Virtual Jaguar core,
-    which can't run Jaguar CD games; those go to BigPEmu instead."""
+    """The Atari Jaguar CD console offers BigPEmu (a made-up "bigpemu" core)
+    and RetroArch's Virtual Jaguar; each choice launches what it says."""
 
     def setUp(self):
         self.emulators = build_emulators_map()
 
-    def _route(self, rom):
-        return find_emulator_for_package("com.retroarch", self.emulators, rom, "virtualjaguar_libretro_android.so")
+    def test_the_bigpemu_choice_launches_bigpemu(self):
+        profile = find_emulator_for_package("com.retroarch", self.emulators, "Myst (USA).cue", "bigpemu_libretro_android.so")
+        self.assertEqual(profile["exe_names"], ["BigPEmu.exe", "bigpemu.exe"])
 
-    def test_cd_images_go_to_bigpemu(self):
-        for rom in ("Battlemorph (World).cue", "Myst (USA).CDI"):
+    def test_the_virtual_jaguar_choice_stays_in_retroarch_for_cd_games_too(self):
+        # for RetroAchievements, which BigPEmu doesn't support
+        for rom in ("Battlemorph (World).cue", "Myst (USA).cdi", "Blue Lightning.chd", "Tempest 2000.j64"):
             with self.subTest(rom=rom):
-                self.assertEqual(self._route(rom)["exe_names"], ["BigPEmu.exe", "bigpemu.exe"])
-
-    def test_cartridges_stay_in_retroarch(self):
-        for rom in ("Tempest 2000 (World).j64", "Alien vs Predator.jag", "Doom.zip"):
-            with self.subTest(rom=rom):
-                profile = self._route(rom)
+                profile = find_emulator_for_package(
+                    "com.retroarch", self.emulators, rom, "virtualjaguar_libretro_android.so")
                 self.assertEqual(profile["exe_names"], ["retroarch.exe"])
                 self.assertIn("cores/virtualjaguar_libretro.dll", profile["pre_args"])
-
-    def test_other_cores_with_cue_files_are_unaffected(self):
-        profile = find_emulator_for_package("com.retroarch", self.emulators, "Game.cue", "swanstation_libretro_android.so")
-        self.assertEqual(profile["exe_names"], ["retroarch.exe"])
 
 
 class Ps3SerialFileTests(unittest.TestCase):

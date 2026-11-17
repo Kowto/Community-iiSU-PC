@@ -28,6 +28,10 @@
             {
               "description": "BigPEmu (PC)",
               "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/bigpemu_libretro_android.so -e ROM %ROM% --activity-clear-top"
+            },
+            {
+              "description": "Virtual Jaguar core",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/virtualjaguar_libretro_android.so -e ROM %ROM% --activity-clear-top"
             }
           ],
           "packages": [
