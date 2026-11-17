@@ -28,6 +28,8 @@ from emulator_lookup import (  # noqa: E402
     find_executable,
     find_rom,
     friendly_emulator_name,
+    read_serial_file,
+    unresolved_serial_file_reason,
     load_path_cache,
     resolve_ps3_serial_file,
     resolve_ps4_serial_file,
@@ -368,6 +370,45 @@ class Ps3SerialFileTests(unittest.TestCase):
             with self.subTest(contents=contents):
                 stub = self._serial_file(contents)
                 self.assertEqual(resolve_ps3_serial_file(stub, self.root), stub)
+
+    def test_files_saved_by_windows_tools_still_resolve(self):
+        eboot = self._eboot("ps3", "game", "NPUA80472")
+        stub = self.root / "ps3" / "LittleBigPlanet.ps3"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        for label, data in (
+            ("utf-8 bom", b"\xef\xbb\xbfNPUA80472\r\n"),
+            ("powershell utf-16", "\ufeffNPUA80472\r\n".encode("utf-16-le")),
+            ("quoted", b'"NPUA80472"'),
+            ("second line ignored", b"NPUA80472\nLittleBigPlanet\n"),
+        ):
+            with self.subTest(label):
+                stub.write_bytes(data)
+                self.assertEqual(read_serial_file(stub), "NPUA80472")
+                self.assertEqual(resolve_ps3_serial_file(stub, self.root), eboot)
+
+    def test_an_rpcs3_dev_hdd0_layout_resolves(self):
+        eboot = self._eboot("ps3", "dev_hdd0", "game", "NPUA80472")
+        stub = self._serial_file("NPUA80472")
+        self.assertEqual(resolve_ps3_serial_file(stub, self.root), eboot)
+
+    def test_a_failed_lookup_is_not_cached_and_a_stale_one_is_ignored(self):
+        stub = self._serial_file("NPUA80472")
+        cache = {"roms": {}}
+        self.assertEqual(find_rom("LittleBigPlanet.ps3", self.root, cache), stub)
+        self.assertEqual(cache["roms"], {})
+        # What an older bridge left behind after a failed lookup.
+        cache["roms"][f"LittleBigPlanet.ps3::{self.root}"] = str(stub)
+        eboot = self._eboot("ps3", "game", "NPUA80472")
+        self.assertEqual(find_rom("LittleBigPlanet.ps3", self.root, cache), eboot)
+
+    def test_the_reason_names_the_serial_and_the_expected_folder(self):
+        stub = self._serial_file("NPUA80472")
+        reason = unresolved_serial_file_reason(stub, self.root)
+        self.assertIn("NPUA80472", reason)
+        self.assertIn("EBOOT.BIN", reason)
+        stub.write_bytes(b"\0" * 4096)
+        self.assertIn("doesn't hold a serial", unresolved_serial_file_reason(stub, self.root))
+        self.assertIsNone(unresolved_serial_file_reason(self.root / "ps3" / "Game.iso", self.root))
 
     def test_other_files_are_untouched(self):
         iso = self.root / "ps3" / "Game.iso"
