@@ -54,14 +54,17 @@ from pathlib import Path, PurePosixPath
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import library_rescan
+import pc_games_paths
 import portable_sdk  # noqa: F401; imported for its import-time PATH fix (adb), not used directly here
+from bridge_config import ConfigMissingError, read_config_file
 from console_names import load_console_lookup, resolve_console_shortname
 from emulator_lookup import XBLA_EXTENSION, xbla_target
 from shared import adb_client
 from shared.platform_compat import subprocess_creationflags
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
-WINDOWS_STUBS_DIR = Path(__file__).parent / "windows_stubs"
+PC_GAME_STUBS_DIR = pc_games_paths.PC_GAME_STUBS_DIR
 DEDUPE_EXCEPTIONS_PATH = Path(__file__).parent / "dedupe_exceptions.json"
 
 AVD_SDCARD_ROOT = "/sdcard"
@@ -216,12 +219,27 @@ def referenced_disc_filenames(
     return referenced
 
 
-def adb(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+# Every adb call is time-limited. Without one, a single wedged adb call
+# hung the whole start sequence, and with it the boot overlay, forever.
+ADB_DEFAULT_TIMEOUT = 60  # seconds
+ADB_PUSH_TIMEOUT = 300
+# The extract writes every placeholder through Android's FUSE layer, measured
+# at roughly 70 files a second, so a flat limit caps how big a library can
+# ever be: it would time out at the same point on every start. The limit
+# grows with the archive instead, see extract_timeout().
+ADB_EXTRACT_TIMEOUT = 600
+ADB_EXTRACT_FILES_PER_EXTRA_SECOND = 50
+# adb shell's own exit code when the connection to the device drops.
+ADB_CONNECTION_LOST = 255
+
+
+def adb(*args: str, check: bool = True, timeout: float = ADB_DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
     # adb.exe is console-subsystem; every caller of this runs from the GUI
     # (pythonw.exe, no console of its own), so without CREATE_NO_WINDOW
     # each call here would flash its own console window.
     return subprocess.run(
-        ["adb", *args], capture_output=True, text=True, check=check, creationflags=subprocess_creationflags()
+        ["adb", *args], capture_output=True, text=True, check=check, creationflags=subprocess_creationflags(),
+        timeout=timeout,
     )
 
 
@@ -239,6 +257,60 @@ def xbla_game_folders(console_folder: Path) -> set[Path]:
         if folder.is_dir() and folder != launcher.parent and folder != console_folder:
             folders.add(folder)
     return folders
+
+
+# Where the previous sync's tree is moved before it's deleted.
+AVD_OLD_ROMS_PREFIX = f"{AVD_SDCARD_ROOT}/.{AVD_ROMS_DIRNAME}_old_"
+
+
+def build_extract_command() -> str:
+    """The old tree has to go so a console removed from the real library
+    (or renamed) doesn't leave its placeholders behind, since tar only ever
+    adds and overwrites. Deleting it first with rm -rf was slow: /sdcard
+    goes through Android's FUSE layer at roughly 200 files a second, so a
+    big leftover tree held up the whole start for minutes. Instead the old
+    tree is renamed out of the way (one operation), the new one extracted,
+    and the old one deleted by a detached background job that outlives
+    this adb shell. Any trees left by earlier interrupted runs go with it.
+    The command's exit code is tar's."""
+    roms = shlex.quote(AVD_ROMS_ROOT)
+    old = shlex.quote(AVD_OLD_ROMS_PREFIX) + "$(date +%s)"
+    old_glob = shlex.quote(AVD_OLD_ROMS_PREFIX) + "*"
+    return (
+        f"if [ -e {roms} ]; then mv {roms} {old} || rm -rf {roms}; fi; "
+        f"cd {shlex.quote(AVD_SDCARD_ROOT)} && tar xf {shlex.quote(AVD_TAR_PUSH_PATH)}; rc=$?; "
+        f"setsid nohup sh -c 'rm -rf {old_glob}' </dev/null >/dev/null 2>&1 & "
+        f"exit $rc"
+    )
+
+
+def extract_timeout(file_count: int) -> int:
+    """Seconds the extract may take for an archive of file_count placeholders:
+    the base limit plus a second for every 50 files, about a third faster
+    than the slowest extract measured, so a large but healthy library always
+    finishes while a wedged adb call still gives up."""
+    return ADB_EXTRACT_TIMEOUT + max(0, file_count) // ADB_EXTRACT_FILES_PER_EXTRA_SECOND
+
+
+def _run_extract(extract_cmd: str, timeout: float = ADB_EXTRACT_TIMEOUT) -> subprocess.CompletedProcess:
+    """Runs the extract, retrying once if adb lost the device partway
+    (exit 255): that's a dropped connection, not a tar error, and the
+    archive is still sitting on the device to try again."""
+    result = None
+    for attempt in range(2):
+        try:
+            result = adb("shell", extract_cmd, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(["adb", "shell"], 1, "", f"timed out after {timeout:.0f}s")
+        if result.returncode != ADB_CONNECTION_LOST or attempt == 1:
+            return result
+        print("The AVD's adb connection dropped during the extract, reconnecting and retrying once...")
+        try:
+            adb("wait-for-device", check=False, timeout=60)
+        except subprocess.TimeoutExpired:
+            return result
+        time.sleep(2)
+    return result
 
 
 def scan_library(
@@ -317,28 +389,28 @@ def collect_serial_file_contents(roms_dir: Path, exact: dict, by_compact: dict) 
     return contents
 
 
-def scan_windows_stubs() -> list[tuple[str, int, int]]:
+def scan_pc_game_stubs() -> list[tuple[str, int, int]]:
     """Windows Apps' .pcgame placeholders live in the install directory
-    (see WINDOWS_STUBS_DIR in windows_apps_service.py), not under roms_dir, so they
+    (see PC_GAME_STUBS_DIR in pc_games_service.py), not under roms_dir, so they
     never clutter the real ROM library on disk, scanned separately here
     and merged into the "windows" console's entries so Windows Apps games
     still show up in iiSU."""
-    if not WINDOWS_STUBS_DIR.is_dir():
+    if not PC_GAME_STUBS_DIR.is_dir():
         return []
     entries = []
-    for file_path in WINDOWS_STUBS_DIR.glob("*.pcgame"):
+    for file_path in PC_GAME_STUBS_DIR.glob("*.pcgame"):
         st = file_path.stat()
         entries.append((file_path.name, st.st_size, int(st.st_mtime)))
     return entries
 
 
-def merge_windows_stubs(consoles: dict[str, list[tuple[str, int, int]]]) -> None:
-    """Merges scan_windows_stubs() into consoles["windows"] in place,
+def merge_pc_game_stubs(consoles: dict[str, list[tuple[str, int, int]]]) -> None:
+    """Merges scan_pc_game_stubs() into consoles["windows"] in place,
     de-duplicating by filename against whatever scan_library() already
     found under a legacy <roms_dir>/windows folder, an install mid-
-    migration (see _migrate_legacy_windows_stubs in windows_apps_service.py) can
+    migration (see _migrate_legacy_pc_game_stubs in pc_games_service.py) can
     otherwise have the same placeholder in both places."""
-    stub_entries = scan_windows_stubs()
+    stub_entries = scan_pc_game_stubs()
     if not stub_entries:
         return
     merged = {name: (name, size, mtime) for name, size, mtime in consoles.get("windows", [])}
@@ -414,8 +486,12 @@ def build_placeholder_tar(
 
 
 def main() -> None:
-    with open(CONFIG_PATH, encoding="utf-8") as f:
-        config = json.load(f)
+    pc_games_paths.migrate_old_names()
+    try:
+        config = read_config_file(CONFIG_PATH)
+    except (ConfigMissingError, OSError) as e:  # damaged, or not there
+        print(e)
+        sys.exit(1)
 
     roms_dir = Path(config["roms_dir"])
     if not roms_dir.is_dir():
@@ -428,7 +504,7 @@ def main() -> None:
 
     exact, by_compact = load_console_lookup()
     consoles, skipped = scan_library(roms_dir, exact, by_compact)
-    merge_windows_stubs(consoles)
+    merge_pc_game_stubs(consoles)
 
     if skipped:
         print("Skipped folders with no matching iiSU console name (rename the folder, or add it to console_names.NAME_OVERRIDES):")
@@ -453,26 +529,28 @@ def main() -> None:
     push_size_mb = tar_path.stat().st_size / 1e6
     print(f"Pushing the archive ({push_size_mb:.1f} MB) to the AVD and extracting it in one shot...")
     push_start = time.time()
-    adb("push", str(tar_path), AVD_TAR_PUSH_PATH)
+    adb("push", str(tar_path), AVD_TAR_PUSH_PATH, timeout=ADB_PUSH_TIMEOUT)
     push_elapsed = max(time.time() - push_start, 0.01)
     print(f"Pushed in {push_elapsed:.1f}s ({push_size_mb / push_elapsed:.1f} MB/s).")
-    # rm -rf first so a console removed from the real library (or renamed)
-    # doesn't leave its old placeholders behind, tar only ever adds/
-    # overwrites, it never removes what a previous sync left there.
-    extract_cmd = (
-        f"rm -rf {shlex.quote(AVD_ROMS_ROOT)} && "
-        f"cd {shlex.quote(AVD_SDCARD_ROOT)} && tar xf {shlex.quote(AVD_TAR_PUSH_PATH)}"
-    )
-    result = adb("shell", extract_cmd, check=False)
-    adb("shell", f"rm -f {shlex.quote(AVD_TAR_PUSH_PATH)}", check=False)
+    extract_cmd = build_extract_command()
+    result = _run_extract(extract_cmd, timeout=extract_timeout(file_count))
+    try:
+        adb("shell", f"rm -f {shlex.quote(AVD_TAR_PUSH_PATH)}", check=False)
+    except subprocess.TimeoutExpired:
+        pass
     tar_path.unlink(missing_ok=True)
     if result.returncode != 0:
-        print("Extracting the archive on the AVD failed:")
+        print(f"Extracting the archive on the AVD failed (exit code {result.returncode}):")
         print(result.stdout)
         print(result.stderr)
         sys.exit(1)
 
-    print("Done. Now hit \"Rescan full library\" in iiSU's Library settings.")
+    library_rescan.mark_changed()
+    if config.get("auto_rescan_library", True):
+        print("Done. iiSU will rescan its library by itself once it's open.")
+    else:
+        print("Done. Now hit \"Rescan full library\" in iiSU's Library settings.")
+
 
 
 if __name__ == "__main__":

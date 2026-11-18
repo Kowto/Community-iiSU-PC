@@ -17,6 +17,7 @@ QStackedWidget, rather than destroyed and rebuilt on every visit, so a
 step's own widgets are always there to read from directly.
 """
 
+import html
 import json
 import sys
 from pathlib import Path
@@ -34,29 +35,27 @@ setup_wizard.ensure_pyside6()
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QListWidget, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 import winapi
-from bridge_config import CONFIG_PATH, ConfigMissingError, load_config
-from console_names import load_console_lookup, resolve_console_shortname
-from launch_bridge import find_executable
-from shared.emulator_defaults import all_emulator_exe_names, describe_profile
+from bridge_config import CONFIG_PATH, ConfigMissingError, load_config, save_config  # noqa: F401
+from console_names import load_console_lookup, resolve_console_shortname, suggest_folder_name
 
-from bridge.ui.dialogs.emulator_dialog import EmulatorDialog
-from bridge.ui.dialogs.emulator_download_dialog import EmulatorDownloadDialog
 from bridge.ui.dialogs.icon_choice_dialog import IconChoiceDialog
+from bridge.ui.widgets.brand_mark import BrandMark
 from bridge.ui.widgets.card import Card
-from bridge.ui.pages.settings.display import REFRESH_RATE_PRESETS, RESOLUTION_PRESETS
+from bridge.ui.pages.settings.display import REFRESH_RATE_PRESETS, RESOLUTION_CUSTOM, RESOLUTION_PRESETS, field_width
 from bridge.ui.widgets.display_preview import DisplayPreview
+from bridge.ui.widgets.emulator_overview import EmulatorOverview
 from bridge.ui.widgets.gradient_divider import GradientDivider
 from bridge.ui.workers.task_runner import run_in_background
-from shared.qt_theme import GREEN, GRADIENT_STOPS, RED, SPACING_LG, SPACING_MD, SPACING_SM, Fonts, apply_theme
+from shared.qt_theme import INPUT_BG, GREEN, GRADIENT_STOPS, RED, SPACING_LG, SPACING_MD, SPACING_SM, Fonts, apply_theme
 
 MODIFIER_NAMES = ["ctrl", "alt", "shift", "win"]
 
-STEP_TITLES = ["Welcome", "ROM Directory", "Emulator Folders", "Emulator Mappings", "Display", "Hotkeys", "Finish"]
+STEP_TITLES = ["Welcome", "ROM Directory", "Emulator Folders", "Your Emulators", "Display", "Hotkeys", "Finish"]
 
 # Qt.Key -> the exact lowercase name bridge/hotkey_keys.py's NAMED_KEY_VK
 # expects, anything not listed here falls back to the pressed character
@@ -71,12 +70,6 @@ _NAMED_KEYS = {
     **{getattr(Qt.Key, f"Key_F{n}"): f"f{n}" for n in range(1, 13)},
 }
 _MODIFIER_KEYS = {Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta, Qt.Key.Key_AltGr}
-
-
-def save_config(config: dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
 
 
 def read_avd_display(avd_name: str) -> dict:
@@ -113,27 +106,43 @@ def _hotkey_signature(hotkey: dict) -> tuple[frozenset, str]:
 
 
 class KeyCaptureDialog(QDialog):
-    """Modal key capture: a real dialog gives modal focus trapping and
-    Esc-to-cancel."""
+    """Modal key capture: a real dialog gives modal focus trapping.
+
+    Every key press is the key being mapped, Escape included. Escape used to
+    cancel the dialog, so the one key that is the default quit key could
+    never be mapped again once it had been changed. Cancelling is the Cancel
+    button, or closing the window (Alt+F4, or its X)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Map a key")
         self.setModal(True)
-        self.setFixedSize(300, 110)
+        self.setFixedSize(440, 190)
         self.captured_key: str | None = None
 
         layout = QVBoxLayout(self)
-        label = QLabel("Press any key...\n(Esc cancels)")
+        label = QLabel("Press the key to use")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setFont(Fonts.heading())
         layout.addWidget(label)
+        hint = QLabel("Any key works, including Escape.\nTo keep the current key, choose Cancel or press Alt+F4.")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
+        hint.setProperty("role", "dim")
+        layout.addWidget(hint)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("ghost")
+        # Never holds keyboard focus: a focused button would take Space and
+        # Enter for itself, and both are keys that can be mapped.
+        self.cancel_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.cancel_button.setAutoDefault(False)
+        self.cancel_button.setDefault(False)
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
-        if key == Qt.Key.Key_Escape:
-            self.reject()
-            return
         if key in _MODIFIER_KEYS:
             return  # keep listening, a bare modifier press isn't a usable hotkey key
         if key in _NAMED_KEYS:
@@ -147,7 +156,7 @@ class KeyCaptureDialog(QDialog):
 
 class HotkeyEditor(QWidget):
     """One "modifiers + key" row (quit hotkey, shutdown hotkey), used
-    twice by HotkeysStep, and reused as-is by the Manager's Advanced
+    twice by HotkeysStep, and reused as-is by the Manager's Controls
     page."""
 
     def __init__(self, title: str, initial: dict, default_key: str, parent=None):
@@ -177,7 +186,7 @@ class HotkeyEditor(QWidget):
         self._key = str(initial.get("key", default_key))
         self.key_label = QLabel(self._key.upper())
         self.key_label.setFixedWidth(60)
-        self.key_label.setStyleSheet("background-color: #0e0e10; padding: 4px; border-radius: 4px;")
+        self.key_label.setStyleSheet(f"background-color: {INPUT_BG}; padding: 4px; border-radius: 4px;")
         key_row.addWidget(self.key_label)
         map_button = QPushButton("Map")
         map_button.clicked.connect(self._capture)
@@ -267,8 +276,15 @@ class RomsStep(QWidget):
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+
+        self.rename_button = QPushButton("Rename These Folders for Me...")
+        self.rename_button.setObjectName("ghost")
+        self.rename_button.clicked.connect(self._rename_suggested)
+        self.rename_button.setVisible(False)
+        layout.addWidget(self.rename_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
 
+        self._suggestions: dict[str, str] = {}
         self.refresh_status()
 
     def roms_dir(self) -> str:
@@ -298,17 +314,54 @@ class RomsStep(QWidget):
                 continue
             (recognized if resolve_console_shortname(child.name, exact, by_compact) else unrecognized).append(child.name)
 
+        # Only suggest a rename that wouldn't collide with a folder already there.
+        existing = {child.name.lower() for child in path.iterdir() if child.is_dir()}
+        self._suggestions = {}
+        for name in unrecognized:
+            suggestion = suggest_folder_name(name, exact, by_compact)
+            if suggestion and suggestion.lower() not in existing:
+                self._suggestions[name] = suggestion
+        self.rename_button.setVisible(bool(self._suggestions))
+
         if not recognized and not unrecognized:
             self.status_label.setText("Empty folder. Add ROMs anytime.")
             self.status_label.setStyleSheet("")
             self.status_label.setProperty("role", "dim")
         elif not unrecognized:
-            self.status_label.setText(f"✓ iiSU will recognize all {len(recognized)} folder(s): {', '.join(recognized)}")
+            self.status_label.setText(f"iiSU will recognize all {len(recognized)} folder(s): {', '.join(recognized)}")
             self.status_label.setStyleSheet(f"color: {GREEN};")
         else:
-            prefix = f"✓ {len(recognized)} recognized, " if recognized else ""
-            self.status_label.setText(f"{prefix}✗ {len(unrecognized)} not recognized by iiSU (rename): {', '.join(unrecognized)}")
-            self.status_label.setStyleSheet(f"color: {RED};")
+            lines = [f"<span style='color:{GREEN}'>{len(recognized)} folder(s) recognized.</span>"] if recognized else []
+            lines.append(f"<span style='color:{RED}'>iiSU won't recognize {len(unrecognized)} folder(s):</span>")
+            for name in unrecognized:
+                safe = html.escape(name)
+                if name in self._suggestions:
+                    lines.append(f"&nbsp;&nbsp;&nbsp;{safe}: rename it to <b>{html.escape(self._suggestions[name])}</b>")
+                else:
+                    lines.append(f"&nbsp;&nbsp;&nbsp;{safe}: not a console name iiSU knows, so it's skipped")
+            self.status_label.setText("<br>".join(lines))
+            self.status_label.setStyleSheet("")
+
+    def _rename_suggested(self) -> None:
+        root = Path(self.roms_dir())
+        plan = "\n".join(f"{old}  to  {new}" for old, new in self._suggestions.items())
+        answer = QMessageBox.question(
+            self, "Rename folders?",
+            f"Rename these folders in {root}?\n\n{plan}\n\n"
+            "Only the folder names change; the games inside stay as they are. Another program "
+            "that remembers the old folder names would need pointing at the new ones.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        failed = []
+        for old, new in self._suggestions.items():
+            try:
+                (root / old).rename(root / new)
+            except OSError as exc:
+                failed.append(f"{old}: {exc}")
+        if failed:
+            QMessageBox.warning(self, "Some folders weren't renamed", "\n".join(failed))
+        self.refresh_status()
 
     def validate(self) -> tuple[bool, str]:
         raw = self.roms_dir()
@@ -322,19 +375,16 @@ class RomsStep(QWidget):
 class EmulatorFoldersStep(QWidget):
     def __init__(self, search_roots: list[str], parent=None):
         super().__init__(parent)
-        self.scan_results: list[tuple[str, bool]] | None = None
-        self._running = False
-
         layout = QVBoxLayout(self)
         layout.setSpacing(SPACING_SM)
 
-        heading = QLabel("Where are your PC emulators installed?")
+        heading = QLabel("Where do you install PC emulators?")
         heading.setFont(Fonts.heading())
         layout.addWidget(heading)
 
         subtitle = QLabel(
-            "Community-iiSU-PC searches these folders for known emulators (DuckStation, Dolphin, "
-            "RetroArch and more). Install them yourself first, they aren't bundled."
+            "Emulators are looked for in these folders and the folders inside them. If you haven't "
+            "installed any yet, that's fine: the next step can download them for you."
         )
         subtitle.setWordWrap(True)
         subtitle.setProperty("role", "dim")
@@ -343,202 +393,77 @@ class EmulatorFoldersStep(QWidget):
         self.roots_list = QListWidget()
         self.roots_list.addItems(search_roots)
         self.roots_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.roots_list.setFixedHeight(110)
-        layout.addWidget(self.roots_list)
+        self.roots_list.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self.roots_list, 1)
 
         btn_row = QHBoxLayout()
-        add_button = QPushButton("Add folder...")
+        add_button = QPushButton("Add Folder...")
         add_button.clicked.connect(self._add_root)
         btn_row.addWidget(add_button)
-        remove_button = QPushButton("Remove selected")
-        remove_button.clicked.connect(self._remove_root)
-        btn_row.addWidget(remove_button)
-        self.scan_button = QPushButton("Scan for installed emulators")
-        self.scan_button.clicked.connect(self._start_scan)
-        btn_row.addWidget(self.scan_button)
-        self.download_button = QPushButton("Download Emulators...")
-        self.download_button.setObjectName("accent")
-        self.download_button.clicked.connect(self._open_downloader)
-        btn_row.addWidget(self.download_button)
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.clicked.connect(self._remove_root)
+        btn_row.addWidget(self.remove_button)
         btn_row.addStretch()
         layout.addLayout(btn_row)
+        self._update_buttons()
 
-        self.status_label = QLabel("")
-        self.status_label.setWordWrap(True)
-        self.status_label.setProperty("role", "dim")
-        layout.addWidget(self.status_label)
-        layout.addStretch()
-
-    def _open_downloader(self) -> None:
-        dialog = EmulatorDownloadDialog(self, search_roots=self.search_roots())
-        dialog.exec()
-        if dialog.installed_any:
-            self._start_scan()
+    def _update_buttons(self) -> None:
+        self.remove_button.setEnabled(bool(self.roots_list.selectedItems()))
 
     def search_roots(self) -> list[str]:
         return [self.roots_list.item(i).text() for i in range(self.roots_list.count())]
 
-    def _add_root(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select a folder to search for emulators")
-        if path:
+    def add_root(self, path: str) -> None:
+        if path and path not in self.search_roots():
             self.roots_list.addItem(path)
+
+    def _add_root(self) -> None:
+        self.add_root(QFileDialog.getExistingDirectory(self, "Select a folder to search for emulators"))
 
     def _remove_root(self) -> None:
         for item in self.roots_list.selectedItems():
             self.roots_list.takeItem(self.roots_list.row(item))
 
-    def is_running(self) -> bool:
-        return self._running
 
-    def _start_scan(self) -> None:
-        if self._running:
-            return
-        roots = self.search_roots()
-        if not roots:
-            self.status_label.setText("Add at least one folder above to scan.")
-            self.status_label.setStyleSheet(f"color: {RED};")
-            return
-        self._running = True
-        self.scan_button.setEnabled(False)
-        self.status_label.setStyleSheet("")
-        self.status_label.setText("Scanning. Large folders like Program Files take a few seconds...")
-        self._scan_signals = run_in_background(self._run_scan, self._on_scan_finished, roots=roots)
+class EmulatorsStep(QWidget):
+    """The same console list as the Manager's PC Emulators page
+    (bridge/ui/widgets/emulator_overview.py), with the consoles your ROM
+    folder has first and a button that downloads just what they need."""
 
-    def _run_scan(self, roots: list[str]) -> list[tuple[str, bool]]:
-        search_paths = [Path(r) for r in roots]
-        cache: dict = {"executables": {}}
-        results = []
-        for label, exe_names in all_emulator_exe_names():
-            found = find_executable(exe_names, search_paths, cache) is not None
-            results.append((label, found))
-        return results
-
-    def _on_scan_finished(self, results: list[tuple[str, bool]]) -> None:
-        self._running = False
-        self.scan_button.setEnabled(True)
-        self.scan_results = results
-        self._render_results()
-
-    def _render_results(self) -> None:
-        if self.scan_results is None:
-            return
-        found_labels = [label for label, ok in self.scan_results if ok]
-        missing_labels = [label for label, ok in self.scan_results if not ok]
-        total = len(self.scan_results)
-        lines = [f"Found {len(found_labels)} of {total} known emulators: {', '.join(found_labels) or '(none yet)'}"]
-        if missing_labels:
-            lines.append(f"Not found: {', '.join(missing_labels)}. Install them and they'll be picked up automatically.")
-        self.status_label.setText("\n".join(lines))
-        self.status_label.setStyleSheet(f"color: {GREEN};" if found_labels else "")
-
-
-class EmulatorMappingsStep(QWidget):
-    def __init__(self, emulators: dict, parent=None):
+    def __init__(self, emulators: dict, folders_step: EmulatorFoldersStep, roms_step: "RomsStep", parent=None):
         super().__init__(parent)
-        self._original_emulators = dict(emulators)
-
+        self._emulators = dict(emulators)
         layout = QVBoxLayout(self)
         layout.setSpacing(SPACING_SM)
 
-        heading = QLabel("Emulator mappings")
+        heading = QLabel("Your emulators")
         heading.setFont(Fonts.heading())
         layout.addWidget(heading)
-
         subtitle = QLabel(
-            "Maps each console's Android package to the PC emulator that runs it. The defaults "
-            "cover most installs. Edit only for a fork with a different executable name "
-            "(e.g. Azahar as azahar.exe instead of citra-qt.exe)."
+            "Which PC emulator each console's games open in. The consoles in your ROM folder come first. "
+            "The defaults suit most people; Change only if you prefer another emulator."
         )
         subtitle.setWordWrap(True)
         subtitle.setProperty("role", "dim")
         layout.addWidget(subtitle)
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Package prefix", "Executable name(s)", "Launch flags"])
-        self.tree.setRootIsDecorated(False)
-        for prefix, profile in emulators.items():
-            exe_display, pre_args_display = describe_profile(profile)
-            self.tree.addTopLevelItem(QTreeWidgetItem([prefix, exe_display, pre_args_display]))
-        self.tree.setColumnWidth(0, 230)
-        self.tree.setColumnWidth(1, 210)
-        layout.addWidget(self.tree, stretch=1)
+        self.overview = EmulatorOverview(
+            get_emulators=lambda: self._emulators,
+            set_emulators=self._set_emulators,
+            get_search_roots=folders_step.search_roots,
+            add_search_root=folders_step.add_root,
+            get_roms_dir=roms_step.roms_dir,
+        )
+        layout.addWidget(self.overview, 1)
 
-        btn_row = QHBoxLayout()
-        add_button = QPushButton("Add...")
-        add_button.clicked.connect(self._add_mapping)
-        btn_row.addWidget(add_button)
-        edit_button = QPushButton("Edit selected...")
-        edit_button.clicked.connect(self._edit_mapping)
-        btn_row.addWidget(edit_button)
-        remove_button = QPushButton("Remove selected")
-        remove_button.clicked.connect(self._remove_mapping)
-        btn_row.addWidget(remove_button)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-    def _find_item(self, prefix: str):
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item.text(0) == prefix:
-                return item
-        return None
-
-    def _add_mapping(self) -> None:
-        dialog = EmulatorDialog(self, "Add emulator mapping")
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result_values:
-            prefix, exe_names, pre_args = dialog.result_values
-            if not prefix:
-                return
-            if self._find_item(prefix) is not None:
-                QMessageBox.critical(self, "Duplicate", f"A mapping for '{prefix}' already exists.")
-                return
-            self.tree.addTopLevelItem(QTreeWidgetItem([prefix, ", ".join(exe_names), ", ".join(pre_args)]))
-
-    def _edit_mapping(self) -> None:
-        selected = self.tree.selectedItems()
-        if not selected:
-            return
-        item = selected[0]
-        prefix = item.text(0)
-        if "by_extension" in self._original_emulators.get(prefix, {}):
-            QMessageBox.information(
-                self, "Can't edit here",
-                "This entry maps a different executable per ROM file extension, so it "
-                "can't be edited as a single executable/flags pair here. Edit config.json instead.",
-            )
-            return
-        dialog = EmulatorDialog(self, "Edit emulator mapping", prefix=item.text(0), exe_names=item.text(1), pre_args=item.text(2))
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result_values:
-            new_prefix, exe_names, pre_args = dialog.result_values
-            index = self.tree.indexOfTopLevelItem(item)
-            self.tree.takeTopLevelItem(index)
-            self.tree.addTopLevelItem(QTreeWidgetItem([new_prefix, ", ".join(exe_names), ", ".join(pre_args)]))
-
-    def _remove_mapping(self) -> None:
-        for item in self.tree.selectedItems():
-            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+    def _set_emulators(self, emulators: dict) -> None:
+        self._emulators = emulators
 
     def get_emulators(self) -> dict:
-        """"by_extension" entries (RetroArch, which maps a different real
-        PC emulator per ROM extension rather than one fixed exe) show a
-        human-readable summary in the tree (see describe_profile), not the
-        real underlying data, always keep the original entry verbatim
-        rather than reconstructing it from that summary text. The edit
-        dialog already refuses to open on these, so the only way one of
-        these rows changes at all is via Remove."""
-        emulators = {}
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            prefix, exe_names_str, pre_args_str = item.text(0), item.text(1), item.text(2)
-            original_entry = self._original_emulators.get(prefix, {})
-            if "by_extension" in original_entry:
-                emulators[prefix] = original_entry
-                continue
-            emulators[prefix] = {
-                "exe_names": [s.strip() for s in exe_names_str.split(",") if s.strip()],
-                "pre_args": [s.strip() for s in pre_args_str.split(",") if s.strip()],
-            }
-        return emulators
+        return dict(self._emulators)
+
+    def on_shown(self) -> None:
+        self.overview.refresh()
 
 
 class DisplayStep(QWidget):
@@ -569,16 +494,16 @@ class DisplayStep(QWidget):
         grid.addWidget(QLabel("Resolution:"), 0, 0)
         resolution_row = QHBoxLayout()
         self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems(RESOLUTION_PRESETS)
-        self.resolution_combo.setCurrentIndex(-1)
+        self.resolution_combo.addItems(RESOLUTION_PRESETS + [RESOLUTION_CUSTOM])
+        self.resolution_combo.setCurrentIndex(self.resolution_combo.findText(RESOLUTION_CUSTOM))
         self.resolution_combo.currentTextChanged.connect(self._apply_resolution_preset)
         resolution_row.addWidget(self.resolution_combo)
         self.width_edit = QLineEdit(str(display.get("width", 1920)))
-        self.width_edit.setFixedWidth(60)
+        self.width_edit.setFixedWidth(field_width(self.width_edit, "00000"))
         resolution_row.addWidget(self.width_edit)
         resolution_row.addWidget(QLabel("x"))
         self.height_edit = QLineEdit(str(display.get("height", 1080)))
-        self.height_edit.setFixedWidth(60)
+        self.height_edit.setFixedWidth(field_width(self.height_edit, "00000"))
         resolution_row.addWidget(self.height_edit)
         resolution_row.addStretch(1)
         grid.addLayout(resolution_row, 0, 1)
@@ -588,7 +513,7 @@ class DisplayStep(QWidget):
         refresh_combo.setEditable(True)
         refresh_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         refresh_combo.addItems(REFRESH_RATE_PRESETS)
-        refresh_combo.setFixedWidth(90)
+        refresh_combo.setFixedWidth(field_width(refresh_combo, "0000") + 28)
         self.refresh_edit = refresh_combo.lineEdit()
         self.refresh_edit.setText(str(display.get("refresh_rate", 60)))
         grid.addWidget(refresh_combo, 1, 1, Qt.AlignmentFlag.AlignLeft)
@@ -610,7 +535,7 @@ class DisplayStep(QWidget):
         columns.addLayout(preview_col)
         layout.addLayout(columns)
 
-        self.fullscreen_check = QCheckBox("Maximize the iiSU/AVD window automatically")
+        self.fullscreen_check = QCheckBox("Show iiSU fullscreen")
         layout.addWidget(self.fullscreen_check)
         layout.addStretch()
 
@@ -619,7 +544,8 @@ class DisplayStep(QWidget):
         self._redraw_preview()
 
     def _apply_resolution_preset(self, text: str) -> None:
-        if "x" not in text:
+        # "Custom" changes nothing: the width and height boxes are the custom size.
+        if text not in RESOLUTION_PRESETS:
             return
         width, height = (part.strip() for part in text.split("x"))
         self.width_edit.setText(width)
@@ -637,9 +563,9 @@ class DisplayStep(QWidget):
         self.refresh_edit.setText(str(hz))
 
     def _sync_resolution_preset(self) -> None:
-        """Shows the preset that matches the typed width and height, or none."""
+        """Shows the preset that matches the typed width and height, or Custom."""
         text = f"{self.width_edit.text().strip()} x {self.height_edit.text().strip()}"
-        index = self.resolution_combo.findText(text)
+        index = self.resolution_combo.findText(text if text in RESOLUTION_PRESETS else RESOLUTION_CUSTOM)
         if index != self.resolution_combo.currentIndex():
             self.resolution_combo.blockSignals(True)
             self.resolution_combo.setCurrentIndex(index)
@@ -678,7 +604,7 @@ class HotkeysStep(QWidget):
 
         note = QLabel(
             "On a controller, press Select+Start together for the same quit action.\n"
-            "Remappable later in Advanced."
+            "Remappable later in Settings > Controls."
         )
         note.setProperty("role", "dim")
         layout.addWidget(note)
@@ -733,8 +659,9 @@ class OnboardingWizard(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Welcome to Community-iiSU-PC")
-        self.resize(760, 760)
-        self.setMinimumSize(700, 760)
+        self.resize(920, 760)
+        self.setMinimumSize(860, 700)
+
 
         try:
             self.config_data = load_config()
@@ -743,7 +670,6 @@ class OnboardingWizard(QMainWindow):
             sys.exit(1)
 
         self.step_index = 0
-        self.scan_results: list[tuple[str, bool]] | None = None
 
         roms_dir = self.config_data.get("roms_dir", "")
         self._original_roms_dir = "" if "CHANGE-ME" in roms_dir else roms_dir
@@ -758,7 +684,7 @@ class OnboardingWizard(QMainWindow):
         self.welcome_step = WelcomeStep()
         self.roms_step = RomsStep(self._original_roms_dir)
         self.folders_step = EmulatorFoldersStep(self._original_search_roots)
-        self.mappings_step = EmulatorMappingsStep(self._original_emulators)
+        self.mappings_step = EmulatorsStep(self._original_emulators, self.folders_step, self.roms_step)
         self.display_step = DisplayStep(display)
         self.display_step.set_fullscreen_default(self.config_data.get("iisu_fullscreen", True))
         self.hotkeys_step = HotkeysStep(self._original_quit_hotkey, self._original_shutdown_hotkey)
@@ -782,23 +708,26 @@ class OnboardingWizard(QMainWindow):
         root.setContentsMargins(SPACING_LG, 20, SPACING_LG, 20)
         root.setSpacing(6)
 
+        title_row = QHBoxLayout()
+        title_row.setSpacing(14)
         self.title_label = QLabel("")
         self.title_label.setFont(Fonts.title())
-        root.addWidget(self.title_label)
+        title_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignBottom)
+        # "Welcome to" and the iiPC mark on the first step, in place of the
+        # product's full name.
+        self.welcome_mark = BrandMark(34, animated=True)
+        title_row.addWidget(self.welcome_mark, 0, Qt.AlignmentFlag.AlignBottom)
+        title_row.addStretch(1)
+        root.addLayout(title_row)
         self.step_label = QLabel("")
         self.step_label.setProperty("role", "dim")
         root.addWidget(self.step_label)
 
         root.addSpacing(4)
-        root.addWidget(GradientDivider())
-        root.addSpacing(SPACING_SM)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, len(STEP_TITLES) - 1)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(6)
+        # The line under the title is also the progress through the steps.
+        self.progress = GradientDivider(height=4)
         root.addWidget(self.progress)
-        root.addSpacing(SPACING_SM)
+        root.addSpacing(SPACING_MD)
 
         content_card = Card()
         card_layout = QVBoxLayout(content_card)
@@ -830,13 +759,19 @@ class OnboardingWizard(QMainWindow):
     def _show_step(self, index: int) -> None:
         self.step_index = index
         self.hint_label.setText("")
-        self.progress.setValue(index)
+        self.progress.set_fraction(index / (len(STEP_TITLES) - 1))
         self.stack.setCurrentIndex(index)
 
         is_welcome, is_last = index == 0, index == len(STEP_TITLES) - 1
-        self.title_label.setText("Welcome to Community-iiSU-PC" if is_welcome else STEP_TITLES[index])
+        show_mark = is_welcome and self.welcome_mark.is_available()
+        self.welcome_mark.setVisible(show_mark)
+        self.title_label.setText(
+            ("Welcome to" if show_mark else "Welcome to Community-iiSU-PC") if is_welcome else STEP_TITLES[index]
+        )
         self.step_label.setText("" if is_welcome or is_last else f"Step {index} of {len(STEP_TITLES) - 2}")
 
+        if self._steps[index] is self.mappings_step:
+            self.mappings_step.on_shown()
         if is_last:
             self.finish_step.refresh(self._summary_lines(), self._missing_emulators_warning())
 
@@ -850,8 +785,6 @@ class OnboardingWizard(QMainWindow):
         self.next_button.setEnabled(True)
 
     def _go_next(self) -> None:
-        if self.folders_step.is_running():
-            return
         if self.step_index == 1:
             ok, message = self.roms_step.validate()
             if not ok:
@@ -860,30 +793,21 @@ class OnboardingWizard(QMainWindow):
         self._show_step(self.step_index + 1)
 
     def _go_back(self) -> None:
-        if self.folders_step.is_running():
-            return
         self._show_step(self.step_index - 1)
 
     # == Finish ==
 
     def _missing_emulators_warning(self) -> str:
-        """Surfaced here, not just on the Emulator Folders step itself, so
-        it's the last thing seen before saving rather than something only
-        visible if you happen to scroll back, a console mapped to an
-        emulator that was never found here will silently fail to launch
-        later with no obvious link back to this step."""
-        results = self.folders_step.scan_results
-        if results is None:
-            return (
-                "You haven't scanned for PC emulators yet. Go back to \"Emulator Folders\" "
-                "and click \"Scan for installed emulators\" before finishing."
-            )
-        missing = [label for label, ok in results if not ok]
+        """The last thing seen before saving: a console in your library whose
+        emulator isn't installed fails to launch later with no obvious link
+        back to this wizard."""
+        missing = self.mappings_step.overview.missing_in_library()
         if not missing:
             return ""
+        needs = ", ".join(sorted({f"{row.emulator} ({row.console_label})" for row in missing}))
         return (
-            f"Still not found: {', '.join(missing)}. Games mapped to these won't launch until "
-            "they're installed and rescanned (\"Emulator Folders\")."
+            f"Not installed yet: {needs}. Those games won't open until it is. "
+            "Go back to \"Your Emulators\" to download it, or do it later in the Manager."
         )
 
     def _summary_lines(self) -> list[str]:
@@ -897,21 +821,21 @@ class OnboardingWizard(QMainWindow):
 
         search_roots = self.folders_step.search_roots()
         if search_roots != self._original_search_roots:
-            results = self.folders_step.scan_results
-            if results is not None:
-                found = sum(1 for _, ok in results if ok)
-                emulator_note = f" ({found}/{len(results)} emulators found)"
-            else:
-                emulator_note = " (not scanned yet)"
-            lines.append(f"Emulator search folders: {len(search_roots)}{emulator_note}")
+            lines.append(f"Emulator folders: {len(search_roots)}")
 
-        if self.mappings_step.get_emulators() != self._original_emulators:
-            lines.append(f"Emulator mappings: {len(self.mappings_step.get_emulators())} configured")
+        rows = self.mappings_step.overview.rows
+        if rows:
+            ready = [row for row in rows if row.in_library and row.status == "found"]
+            if ready:
+                lines.append(f"Ready to play: {', '.join(row.console_label for row in ready)}")
+        changed = [row for row in rows if not row.is_default and row.console]
+        if self.mappings_step.get_emulators() != self._original_emulators and changed:
+            lines.append("Emulators changed: " + ", ".join(f"{row.console_label} opens in {row.emulator}" for row in changed))
 
         if self._display_changed():
             lines.append(
                 f"Display: {self.display_step.width_edit.text()}×{self.display_step.height_edit.text()} "
-                f"@ {self.display_step.refresh_edit.text()}Hz (will cold-boot the VM once to apply)"
+                f"@ {self.display_step.refresh_edit.text()}Hz (the first start takes a little longer to apply it)"
             )
 
         if _hotkey_signature(self.hotkeys_step.quit_editor.read_hotkey()) != _hotkey_signature(self._original_quit_hotkey):

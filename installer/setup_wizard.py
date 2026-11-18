@@ -34,7 +34,7 @@ from jre_env import java_exe, java_subprocess_env, keytool_exe
 from patch_iisu import patch_apk, validate_iisu_apk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from shared import app_version, iisu_install_record, vm_storage
+from shared import app_version, emulation_info, iisu_install_record, system_info, vm_storage
 from shared.steam_deck import STEAM_DECK_DISPLAY, is_steam_deck
 from shared.platform_compat import IS_WINDOWS, detached_popen_kwargs, subprocess_creationflags
 from shared.vm_backend import (
@@ -182,7 +182,7 @@ def require_java() -> None:
 def warn_missing_linux_extras() -> None:
     """Non-fatal: unlike java/keytool, nothing actually stops Setup or day-
     to-day use without xdotool/flatpak, each just quietly degrades one
-    specific feature (see README's Linux support note) rather than
+    specific feature (see docs/linux.md) rather than
     failing outright, so this only prints a heads-up rather than raising,
     the same "best effort, log it, keep going" pattern
     virtualization_diagnostics() already uses for a non-fatal check."""
@@ -395,6 +395,12 @@ def virtualization_diagnostics() -> dict:
     return result
 
 
+def format_duration(seconds: float) -> str:
+    """"42s" or "3m 05s", for the Setup log."""
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m {seconds % 60:02d}s"
+
+
 def enable_hypervisor_platform() -> None:
     """Turns on Windows' "Windows Hypervisor Platform" optional feature,
     what the Android Emulator actually needs on Windows (a lighter-weight
@@ -602,6 +608,9 @@ def boot_avd_and_install(
         print("[setup] booting the AVD once to install iiSU (this can take a minute)...")
         import portable_sdk
         portable_sdk.set_quickboot_autosave(portable_sdk.PORTABLE_AVD_HOME / f"{avd_name}.avd", enabled=False)
+        accel_line = emulation_info.accel_check_line(emulator_exe)
+        if accel_line:
+            print(f"[setup] {accel_line}")
         process = _launch_install_emulator(emulator_exe, avd_name, env, log_path)
 
     if not wait_for_avd(avd_name, AVD_BOOT_TIMEOUT, process=process):
@@ -622,7 +631,7 @@ def boot_avd_and_install(
             )
 
         diag = virtualization_diagnostics()
-        setup_script = "Setup.bat" if IS_WINDOWS else "Setup.sh"
+        setup_script = "Setup"
         if crashed_early and not diag["cpu_virtualization_enabled"]:
             if IS_WINDOWS:
                 raise VirtualizationError(
@@ -861,7 +870,12 @@ def update_iisu(
     config_path = BRIDGE_DIR / "config.json"
     if not config_path.is_file():
         raise RuntimeError(f"{config_path} not found, run Setup first before updating iiSU.")
-    saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        saved_config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except ValueError as e:
+        raise RuntimeError(
+            f"{config_path} is damaged and can't be read ({e}). Open the Manager's Home page to repair it, then update iiSU again."
+        ) from None
     avd_name = saved_config["avd_name"]
     backend = resolve_backend(saved_config)
 
@@ -969,9 +983,21 @@ def write_bridge_config(avd_name: str, backend: str = BACKEND_AVD, storage_gb: i
     from shared.emulator_defaults import build_emulators_map
 
     config_path = BRIDGE_DIR / "config.json"
+    config = None
     if config_path.is_file():
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    else:
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        except ValueError:
+            config = None
+        if not isinstance(config, dict):
+            # Damaged (cut short mid-save, or a bad hand edit). Setup used to
+            # stop here with a JSON error; it keeps the file under another
+            # name and starts from the template instead.
+            config = None
+            kept = config_path.with_name(f"config.damaged-{time.strftime('%Y%m%d-%H%M%S')}.json")
+            config_path.replace(kept)
+            print(f"[setup] {config_path.name} was damaged and couldn't be read; kept it as {kept.name} and started from default settings.")
+    if config is None:
         config = json.loads((INSTALLER_DIR / "config.template.json").read_text(encoding="utf-8"))
         if not IS_WINDOWS:
             # Best-guess Linux ROM/emulator locations: a couple of common
@@ -1034,7 +1060,7 @@ def install_default_redirectors() -> None:
             f"build-tools not found under {stub_apk.BUILD_TOOLS_DIR} (tried to copy them from "
             f"{expected_source}, which {'exists' if expected_source.is_dir() else 'does not exist'}), "
             "redirector apps can't be built without them, and most consoles won't appear as playable "
-            "in iiSU without their stub. Re-run Setup.bat; if this keeps happening, check that the SDK "
+            "in iiSU without their stub. Run Setup again; if this keeps happening, check that the SDK "
             "download actually included build-tools."
         )
 
@@ -1090,14 +1116,28 @@ def run_setup(
     stages = WAYDROID_SETUP_STAGES if backend == BACKEND_WAYDROID else SETUP_STAGES
     total = len(stages)
 
+    setup_started = time.monotonic()
+    step_started = {"at": setup_started, "label": None}
+
     def stage(index: int) -> None:
+        # How long the step before took, so a slow Setup shows where the time went.
+        now = time.monotonic()
+        if step_started["label"] is not None:
+            print(f"[setup] \"{step_started['label']}\" took {format_duration(now - step_started['at'])}.")
         label = stages[index]
+        step_started.update(at=now, label=label)
         print(f"\n=== Step {index + 1}/{total}: {label} ===")
         if on_stage:
             on_stage(label, index + 1, total)
 
     storage_gb = vm_storage.clamp_storage_gb(storage_gb)
     print(app_version.banner("setup", f"backend {backend}"))
+    for line in system_info.summary_lines(PROJECT_ROOT):
+        print(f"[setup] {line}")
+    if backend == BACKEND_AVD:
+        # Before the multi-GB download, not only after a first boot has failed.
+        for line in emulation_info.system_lines():
+            print(f"[setup] {line}")
     if backend == BACKEND_AVD:
         print(f"[setup] Android VM internal storage: {storage_gb} GB (a maximum, it only uses what's filled), lean profile: {'on' if lean else 'off'}")
     print("=== Community-iiSU-PC first-time setup ===\n")
@@ -1168,8 +1208,9 @@ def run_setup(
     )
     cleanup_installer_sdk()
     create_desktop_shortcut(apk_path)
+    print(f"[setup] \"{step_started['label']}\" took {format_duration(time.monotonic() - step_started['at'])}.")
 
-    print("\n=== Setup complete ===")
+    print(f"\n=== Setup complete in {format_duration(time.monotonic() - setup_started)} ===")
     if backend == BACKEND_WAYDROID:
         print("iiSU is installed in Waydroid and the bridge is configured for it.")
     else:
@@ -1179,11 +1220,15 @@ def run_setup(
 
 def main() -> None:
     apk_path = find_input_apk()
+    if "--download-latest" in sys.argv:
+        import iisu_release
+        apk_path = iisu_release.download_latest(INPUT_DIR)
     if apk_path is None:
         INPUT_DIR.mkdir(parents=True, exist_ok=True)
         print(f"No iiSU APK found in {INPUT_DIR}.")
         print("Drop your own copy of the iiSU APK into that folder (any filename, .apk extension)")
-        print("and run this again. This tool patches your copy, it doesn't come with one.")
+        print("and run this again, or run it with --download-latest to fetch the latest official")
+        print("release from iiSU's GitHub. This tool patches your copy, it doesn't come with one.")
         sys.exit(1)
     with session_log():
         run_setup(apk_path)

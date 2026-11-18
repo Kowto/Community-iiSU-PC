@@ -33,12 +33,16 @@ from bridge.ui.pages.backup_diagnostics.diagnostics import DiagnosticsPage
 from bridge.ui.pages.credits import CreditsPage
 from bridge.ui.pages.emulators.pc_emulators import EmulatorsPage
 from bridge.ui.pages.games.console_browser import ConsoleBrowserPage
-from bridge.ui.pages.games.windows_apps import WindowsAppsPage
+from bridge.ui.pages.games.pc_games import PcGamesPage
 from bridge.ui.pages.home import HomePage
 from bridge.ui.pages.library.android_storage import AndroidStoragePage
 from bridge.ui.pages.library.media_library import MediaLibraryPage
 from bridge.ui.pages.library.roms import RomsPage
+from bridge.ui import help_links
 from bridge.ui.pages.settings.advanced import AdvancedPage
+
+from bridge.ui.pages.settings.controls import ControlsPage
+from bridge.ui.pages.settings.general import GeneralPage
 from bridge.ui.pages.settings.storage import StoragePage
 from bridge.ui.pages.settings.display import DisplayPage
 from bridge.ui.pages.settings.emulator import EmulatorPage
@@ -47,14 +51,14 @@ from bridge.ui.pages.updates import UpdatesPage
 from bridge.ui.widgets.transitions import fade_in
 from bridge.ui.workers.task_runner import run_in_background
 from bridge.ui.sidebar import DANGER_NAV_ITEMS, LOCKED_NAV, NAV_GROUPS, NAV_ITEMS, Sidebar
-from bridge_config import CONFIG_PATH, load_config, save_config
+from bridge_config import CONFIG_PATH, ConfigInvalidError, load_config, save_config
 import emulator_profiles
 from shared.platform_compat import detached_popen_kwargs
 from shared.qt_theme import GREEN, PANEL_BG_HOVER, RED
 
 # Sub-page keys (or top-level keys with no group) that use the shared
 # bottom Save bar to commit straight to config.json.
-SAVE_BAR_PAGES = {"roms", "emulators", "settings", "advanced"}
+SAVE_BAR_PAGES = {"roms", "emulators", "settings", "general", "controls", "advanced"}
 
 
 class ManagerWindow(QMainWindow):
@@ -67,6 +71,10 @@ class ManagerWindow(QMainWindow):
 
         self.config_data: dict = {}
         self.configured = False
+        # Why config.json can't be read, when it exists but is damaged. Not
+        # the same as "not set up": Home offers a repair instead of Setup.
+        self.config_problem: str | None = None
+        self._config_recovery_open = False
         self._config_mtime: float | None = None
         self.last_avd_up: bool | None = None
         self.last_bridge_up: bool | None = None
@@ -111,6 +119,13 @@ class ManagerWindow(QMainWindow):
         self.save_status_label.setStyleSheet(f"color: {GREEN};")
         save_bar_layout.addWidget(self.save_status_label)
         save_bar_layout.addStretch(1)
+        # Settings can't be saved while iiSU runs; this is the way out,
+        # instead of a message that says to go and stop it somewhere else.
+        self.stop_to_save_button = QPushButton("Stop iiSU")
+        self.stop_to_save_button.setObjectName("ghost")
+        self.stop_to_save_button.clicked.connect(lambda: self.home_page._stop())
+        self.stop_to_save_button.setVisible(False)
+        save_bar_layout.addWidget(self.stop_to_save_button)
         self.save_button = QPushButton("Save")
         self.save_button.setObjectName("accent")
         self.save_button.clicked.connect(self._on_save_clicked)
@@ -144,8 +159,8 @@ class ManagerWindow(QMainWindow):
         self.register_subpage("roms", self.roms_page)
         self.emulators_page = EmulatorsPage(self)
         self.register_subpage("emulators", self.emulators_page)
-        self.windows_apps_page = WindowsAppsPage(self)
-        self.register_subpage("windows_apps", self.windows_apps_page)
+        self.pc_games_page = PcGamesPage(self)
+        self.register_subpage("pc_games", self.pc_games_page)
         self.register_subpage("android_storage", AndroidStoragePage(self))
         self.register_subpage("media_library", MediaLibraryPage(self))
         self.register_subpage("games_console", ConsoleBrowserPage(self))
@@ -154,6 +169,10 @@ class ManagerWindow(QMainWindow):
         self.emulator_page = EmulatorPage(self)
         self.register_subpage("emulator", self.emulator_page)
         self.register_subpage("storage", StoragePage(self))
+        self.general_page = GeneralPage(self)
+        self.register_subpage("general", self.general_page)
+        self.controls_page = ControlsPage(self)
+        self.register_subpage("controls", self.controls_page)
         self.advanced_page = AdvancedPage(self)
         self.register_subpage("advanced", self.advanced_page)
         self.register_subpage("backup_restore", BackupRestorePage(self))
@@ -168,8 +187,10 @@ class ManagerWindow(QMainWindow):
             self.display_page.reload_from_config,
             self.emulator_page.reload_from_config,
             self.advanced_page.reload_from_config,
+            self.general_page.reload_from_config,
+            self.controls_page.reload_from_config,
         ]
-        for key in ("roms", "emulators", "settings", "emulator", "advanced"):
+        for key in ("roms", "emulators", "settings", "emulator", "general", "controls", "advanced"):
             self.dirty_checkers[key] = self._is_settings_dirty
             self.save_handlers[key] = self._save_settings
 
@@ -184,18 +205,25 @@ class ManagerWindow(QMainWindow):
         self._dirty_timer.timeout.connect(self._poll_settings_dirty)
         self._dirty_timer.start(500)
 
+        # A controller can drive the Manager too (bridge/ui/gamepad_nav.py).
+        from bridge.ui.gamepad_nav import ManagerGamepad
+
+        self._gamepad = ManagerGamepad(self)
+
         self._startup_update_signals = None
+
         QTimer.singleShot(500, self._run_startup_update_check)
         self._repatch_wizard = None
         QTimer.singleShot(700, self._prompt_repatch_if_needed)
+        QTimer.singleShot(300, self.offer_config_recovery)
 
     # == Style / icon ==
 
     def _apply_window_icon(self) -> None:
         import create_shortcut
 
-        # From the file: this runs before config_data is loaded.
-        icon_path = create_shortcut.icon_path_for(create_shortcut.configured_icon_choice())
+        # The Manager's own icon, whichever icon the launch shortcut shows.
+        icon_path = create_shortcut.MANAGER_ICON_PATH
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))
 
@@ -206,9 +234,19 @@ class ManagerWindow(QMainWindow):
         save_config(self.config_data)
         self._apply_window_icon()
 
+    def set_home_show_logs(self, shown: bool) -> None:
+        """Remembers whether the Home page's log drawer is shown, saved on
+        its own the same way as the icon choice. Before Setup there is no
+        config file yet, and this must not be what creates one."""
+        if not self.configured:
+            return
+        self.config_data["home_show_logs"] = shown
+        save_config(self.config_data)
+
     # == Config state ==
 
     def _reload_config(self) -> None:
+        self.config_problem = None
         if CONFIG_PATH.is_file():
             try:
                 self.config_data = load_config()
@@ -217,9 +255,14 @@ class ManagerWindow(QMainWindow):
                 # so the VM Profiles page isn't "dirty" the moment it opens.
                 active, profiles = emulator_profiles.get_profiles(self.config_data)
                 self.config_data = emulator_profiles.with_profiles(self.config_data, active, profiles)
+                # Same for the startup volume, added after installs existed.
+                self.config_data.setdefault("startup_volume", 100)
+                self.config_data.setdefault("boot_overlay_details", False)
                 self.configured = True
                 self._config_mtime = CONFIG_PATH.stat().st_mtime
                 return
+            except ConfigInvalidError as e:
+                self.config_problem = e.reason
             except Exception:
                 pass
         self.config_data = {}
@@ -268,11 +311,28 @@ class ManagerWindow(QMainWindow):
             settings["bridge_port"] = port
             settings["avd_name"] = self.advanced_page.get_avd_name()
             settings["iisu_window_title"] = self.advanced_page.get_window_title()
-            settings["quit_hotkey"] = self.advanced_page.get_quit_hotkey()
-            settings["shutdown_hotkey"] = self.advanced_page.get_shutdown_hotkey()
-            settings["controller_quit_chord"] = self.advanced_page.get_controller_quit_chord()
-            settings["show_boot_overlay"] = self.advanced_page.get_show_boot_overlay()
             settings["debug_show_console_windows"] = self.advanced_page.get_debug_show_console_windows()
+        if hasattr(self, "controls_page"):
+            settings["quit_hotkey"] = self.controls_page.get_quit_hotkey()
+            settings["shutdown_hotkey"] = self.controls_page.get_shutdown_hotkey()
+            settings["controller_quit_chord"] = self.controls_page.get_controller_quit_chord()
+        if hasattr(self, "general_page"):
+            settings["show_boot_overlay"] = self.general_page.get_show_boot_overlay()
+            settings["startup_volume"] = self.general_page.get_startup_volume()
+            settings["boot_overlay_details"] = self.general_page.get_boot_overlay_details()
+            # Only written once it's been changed from its default (on), so a
+            # config from before the setting existed doesn't read as unsaved.
+            manager_theme = self.general_page.get_manager_theme()
+            if manager_theme != "system" or "manager_theme" in self.config_data:
+                settings["manager_theme"] = manager_theme
+            # Same for the theme sync, which defaults to off.
+            theme_sync = self.general_page.get_sync_android_theme()
+            if theme_sync or "sync_android_theme" in self.config_data:
+                settings["sync_android_theme"] = theme_sync
+            auto_rescan = self.general_page.get_auto_rescan_library()
+            if not auto_rescan or "auto_rescan_library" in self.config_data:
+                settings["auto_rescan_library"] = auto_rescan
+
 
         if hasattr(self, "emulator_page"):
             settings["emulator_profiles"] = self.emulator_page.get_emulator_profiles()
@@ -301,6 +361,7 @@ class ManagerWindow(QMainWindow):
         settings = self._gather_settings()
         if settings is None:
             return False
+
         self.config_data = settings
         save_config(self.config_data)
         self._write_avd_display_profile(self.config_data)
@@ -334,10 +395,17 @@ class ManagerWindow(QMainWindow):
     # == Chrome: sidebar + page container ==
 
     def _register_page(self, key: str, widget: QWidget) -> None:
+        self._attach_help(key, widget)
         self.pages[key] = widget
         self.page_stack.addWidget(widget)
 
+    def _attach_help(self, key: str, widget: QWidget) -> None:
+        topic = help_links.TOPICS.get(key)
+        if topic and hasattr(widget, "set_help_topic"):
+            widget.set_help_topic(topic)
+
     def register_subpage(self, sub_key: str, widget: QWidget) -> None:
+        self._attach_help(sub_key, widget)
         """Adds a sub-page to its group's stack, replacing one already
         registered under the same key."""
         stack = self.subpage_stacks[self._group_for_sub(sub_key)]
@@ -348,7 +416,15 @@ class ManagerWindow(QMainWindow):
         stack.addWidget(widget)
         self.subpages[sub_key] = widget
 
+    def open_page(self, page: str, sub_page: str | None = None) -> None:
+        """Shows a page, and one of its sub-pages: for buttons elsewhere in
+        the Manager that send someone to where a thing is fixed."""
+        self.show_page(page)
+        if sub_page is not None:
+            self._show_subpage(page, sub_page)
+
     def _group_for_sub(self, sub_key: str) -> str:
+
         for group_key, subs in NAV_GROUPS.items():
             if any(sub_key == sk for sk, _label in subs):
                 return group_key
@@ -403,6 +479,19 @@ class ManagerWindow(QMainWindow):
                 self._reload_config()
                 self.rebuild_settings_pages()
         self.show_page(key)
+
+    def step_page(self, delta: int) -> None:
+        """The previous (-1) or next (+1) page in the sidebar, skipping the
+        ones that need an install first; for a controller's LB and RB."""
+        keys = [key for key, _icon, _label in NAV_ITEMS]
+        if self.current_page not in keys:
+            return
+        index = keys.index(self.current_page)
+        for _ in range(len(keys)):
+            index = (index + delta) % len(keys)
+            if keys[index] not in LOCKED_NAV or self.configured:
+                self._on_nav_click(keys[index])
+                return
 
     def _on_subnav_click(self, group_key: str, sub_key: str) -> None:
         if group_key == self.current_page and sub_key == self.current_subpage:
@@ -498,12 +587,34 @@ class ManagerWindow(QMainWindow):
     def refresh_save_lock(self, avd_up: bool | None, bridge_up: bool | None) -> None:
         running = bool(avd_up) or bool(bridge_up)
         self.save_button.setEnabled(not running)
+        self.stop_to_save_button.setVisible(running)
         if running:
             self.save_status_label.setText("Stop Community-iiSU-PC to change settings")
             self.save_status_label.setStyleSheet(f"color: {RED};")
         elif self.save_status_label.text() == "Stop Community-iiSU-PC to change settings":
             self.save_status_label.setText("")
             self.save_status_label.setStyleSheet(f"color: {GREEN};")
+
+    # == Damaged settings file ==
+
+    def offer_config_recovery(self) -> None:
+        """Offers to repair a config.json that can't be read. Called at
+        startup, when Home's status poll finds the file has gone bad, and from
+        Home's Repair Settings button."""
+        if not self.config_problem or self._config_recovery_open:
+            return
+        from bridge.ui.dialogs.config_recovery_dialog import run_config_recovery
+
+        self._config_recovery_open = True
+        try:
+            repaired = run_config_recovery(self, self.config_problem)
+        finally:
+            self._config_recovery_open = False
+        if repaired:
+            self._reload_config()
+            self.refresh_nav_enabled()
+            self.home_page.refresh_home_state()
+            self.rebuild_settings_pages()
 
     # == Required iiSU repatch ==
 
@@ -512,7 +623,7 @@ class ManagerWindow(QMainWindow):
         patched, in which case iiSU isn't started until it's repatched."""
         from shared import iisu_install_record
 
-        return self.configured and iisu_install_record.needs_repatch(iisu_install_record.load())
+        return self.configured and iisu_install_record.needs_repatch(iisu_install_record.load(), self.config_data)
 
     def _vm_running(self) -> bool:
         if self.last_avd_up or self.last_bridge_up:

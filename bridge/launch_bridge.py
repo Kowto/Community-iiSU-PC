@@ -65,6 +65,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import game_overrides
+import launch_problems
+import pc_games_paths
+import library_rescan
+import system_theme
+
 import portable_sdk  # noqa: F401; imported for its import-time PATH fix (adb), not used directly here
 from bridge_config import ConfigMissingError, load_config
 from controller_bridge import ControllerBridge
@@ -77,6 +82,7 @@ from emulator_lookup import (
     find_rom,
     friendly_emulator_name,
     load_path_cache,
+    rom_location_in_vm,
     save_path_cache,
     unresolved_serial_file_reason,
 )
@@ -87,9 +93,11 @@ from hotkey_keys import MODIFIER_FLAGS, MODIFIER_VK, resolve_vk
 # subprocess with cwd set to this directory, not the project root.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from bridge.ui import boot_overlay_qt as boot_overlay
-from shared import adb_client, app_version
+from shared import adb_client, app_version, log_stamp
+from shared.iisu_install_record import GUEST_BRIDGE_PORT
+from shared.linux_emulators import linux_path_names
 from shared.platform_compat import IS_WINDOWS, detached_popen_kwargs, new_console_creationflags, open_uri, subprocess_creationflags
-from shared.vm_backend import BACKEND_WAYDROID, resolve_backend, vm_device_connected
+from shared.vm_backend import BACKEND_WAYDROID, resolve_backend, vm_device_connected, vm_device_listed
 from winapi import (
     SW_MINIMIZE,
     SW_RESTORE,
@@ -101,6 +109,7 @@ from winapi import (
     close_window,
     make_fullscreen,
     nudge_focus_with_click,
+    pid_is_running,
     user32,
     wait_for_new_visible_window,
     wait_for_new_visible_window_excluding_processes,
@@ -113,7 +122,7 @@ from winapi import (
 STOP_SCRIPT = Path(__file__).parent / "stop_iisu_pc.py"
 STOP_LOG_PATH = Path(__file__).parent / "stop.log"
 LAUNCH_LOG_PATH = Path(__file__).parent / "launch_history.log"
-WINDOWS_APPS_PATH = Path(__file__).parent / "windows_apps.json"
+PC_GAMES_PATH = pc_games_paths.PC_GAMES_PATH
 
 DEFAULT_IISU_COMPONENT = "com.iisulauncher/com.iisulauncher.launcher.StartupSafeModeActivity"
 
@@ -129,6 +138,17 @@ SHUTDOWN_HOTKEY_ID = 2
 MOD_NOREPEAT = 0x4000
 
 KEY_POLL_INTERVAL = 0.03  # seconds, responsive without busy-looping
+# How long the quit key has to be held to quit a Windows program or Steam
+# game. A tap is left to the game: Escape is the pause/menu key in most PC
+# games, and a tap used to kill the game outright, unsaved progress and all.
+NATIVE_QUIT_HOLD_SECONDS = 1.5
+# How long a Windows program gets to close by itself after being asked to
+# (as if its window's X was clicked) before it is ended by force.
+NATIVE_CLOSE_GRACE_SECONDS = 5.0
+# How many checks in a row the VM has to be missing from adb's device list
+# before the bridge takes it as gone, and how long between them.
+VM_GONE_CHECKS = 5
+VM_GONE_CHECK_SECONDS = 2.0
 BOOTANIM_WAIT_SECONDS = 90  # generous cap; see launch_iisu's docstring
 
 
@@ -144,35 +164,26 @@ def _is_key_down(vk: int) -> bool:
 # so binding 0.0.0.0 would expose the bridge unnecessarily.
 HOST = "127.0.0.1"
 
-INTENT_CMP_RE = re.compile(r"cmp=(\S+)")
-INTENT_DAT_RE = re.compile(r"dat=(\S+)")
-
-# iiSU's own default emulator list routes Steam/GOG/Epic-style entries to
-# GameNative, an Android app that runs Windows PC games under Wine/Box64,
-# irrelevant here, since this project always has the real thing (Steam
-# itself) available PC-side already. Its launch command
-# (emuladores_default.json's "%PACKAGE%/.MainActivity -a
-# app.gamenative.LAUNCH_GAME -e app_id %GAMENATIVE_APP_ID_INT%") passes the
-# Steam App ID as a plain int Intent extra, not a file path or ClipData URI,
-# there's no "rom" to find under roms_dir at all, unlike every other
-# entry in config.json's emulators map, so this is handled as its own
-# special case below rather than forced into the exe_names/rom_path shape
-# every other profile uses.
-GAMENATIVE_PACKAGE = "app.gamenative"
-WINDOWS_LAUNCH_PACKAGES = {"com.winlator.cmod", "com.winlator", "com.cmodded.winlator"}
-
-# The one byte answered to the patched iiSU after each launch (see
-# installer/smali_patch/LaunchBridge$1.smali). "A" hands the launch back to
-# Android unchanged; "P" means the PC took it.
-REPLY_LAUNCH_ON_ANDROID = b"A"
-REPLY_HANDLED_ON_PC = b"P"
-# The line a patched iiSU adds to every launch once it reads that answer. An
-# iiSU patched before then hangs up without reading it, so for that one the
-# bridge starts the Android app itself, and nobody has to re-patch.
-REPLY_CAPABLE_LINE = "BRIDGE_REPLY:1"
-INTENT_ACT_RE = re.compile(r"\bact=(\S+)")
-INTENT_CAT_RE = re.compile(r"\bcat=\[([^\]]*)\]")
-INTENT_FLG_RE = re.compile(r"\bflg=(0x[0-9a-fA-F]+)")
+# The launch protocol and Intent parsing live in launch_requests.py; these
+# names stay importable from here for the rest of the bridge and the tests.
+import launch_requests
+from launch_requests import (  # noqa: E402
+    INTENT_CMP_RE,
+    INTENT_DAT_RE,
+    GAMENATIVE_PACKAGE,
+    WINDOWS_LAUNCH_PACKAGES,
+    REPLY_LAUNCH_ON_ANDROID,
+    REPLY_HANDLED_ON_PC,
+    REPLY_CAPABLE_LINE,
+    REQUEST_END_LINE,
+    REQUEST_TIMEOUT_SECONDS,
+    INTENT_ACT_RE,
+    INTENT_CAT_RE,
+    INTENT_FLG_RE,
+    android_start_command,
+    belongs_on_android,
+    launch_package,
+)
 
 # Set to the currently-running emulator Popen while a game is active, so the
 # quit hotkey listener (on its own thread) has something to terminate.
@@ -184,6 +195,11 @@ current_native_window: int | None = None
 # HWND while the process itself keeps running; the PID is the stable fallback
 # for controller gating and the quit hotkey.
 current_native_pid: int | None = None
+# True while the tracked native window is a Windows program or Steam game
+# (launch_pc_game, launch_steam_game), as opposed to an emulator that
+# relaunched itself. The quit key treats the two differently, see
+# quit_key_watcher.
+current_native_is_app = False
 # Becomes True immediately when iiSU hands a launch to the PC side. This
 # closes the Steam startup gap before a real native HWND/PID exists.
 game_handoff_active = False
@@ -241,22 +257,10 @@ def _window_pid(hwnd: int) -> int | None:
 
 
 def _pid_is_running(pid: int | None) -> bool:
-    if not pid:
-        return False
-    # tasklist is available on supported Windows installs and avoids keeping
-    # another process HANDLE open for the whole game session.
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            creationflags=subprocess_creationflags(),
-            timeout=2,
-        )
-        return result.returncode == 0 and f'"{pid}"' in result.stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
+    # Asked of the system directly (see winapi's pid_is_running): this runs
+    # four times a second for as long as a game does, and used to start
+    # tasklist.exe each time, which also never existed on Linux.
+    return pid_is_running(pid)
 
 
 def _terminate_native_pid(pid: int) -> bool:
@@ -273,17 +277,53 @@ def _terminate_native_pid(pid: int) -> bool:
         return False
 
 
-def _adb_media_volume_get() -> int | None:
-    """Read Android's MUSIC stream volume (stream 3) without showing a
-    console. Tries the current `cmd media_session volume` API first,
-    falling back to the older `media volume` command some system image
-    versions still need. Both run in one device shell command."""
+VOLUME_RE = re.compile(r"volume\s+is\s+(\d+)(?:\s+in\s+range\s+\[(\d+)\.\.(\d+)\])?", re.IGNORECASE)
+
+
+def _close_native_app(hwnd: int | None, pid: int | None, grace: float = NATIVE_CLOSE_GRACE_SECONDS) -> None:
+    """Quits a Windows program or Steam game the way closing its window
+    would, so it can save and shut down properly, and ends it by force only
+    if it is still running after `grace` seconds. Force first, as it used to
+    be, could cost unsaved progress and leave a game's files half written."""
+    asked = bool(hwnd) and user32.IsWindow(hwnd) and close_window(hwnd)
+    if not pid:
+        return
+    if not asked:
+        _terminate_native_pid(pid)
+        return
+
+    def end_if_still_running() -> None:
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            if not _pid_is_running(pid):
+                return
+            time.sleep(0.2)
+        log_launch(f"QUIT: PID {pid} was still running {grace:.0f}s after being asked to close, ending it")
+        _terminate_native_pid(pid)
+
+    threading.Thread(target=end_if_still_running, daemon=True).start()
+
+
+def _adb_media_volume_query() -> tuple[int, int | None] | None:
+    """Android's MUSIC stream volume (stream 3) as (current step, highest
+    step), or None when it can't be read. The highest step is None on a
+    system image that doesn't print the range. Tries the current
+    `cmd media_session volume` API first, falling back to the older
+    `media volume` command some system image versions still need. Both run
+    in one device shell command, without showing a console."""
     _status, output = adb_client.shell(
         "cmd media_session volume --stream 3 --get 2>/dev/null || media volume --stream 3 --get 2>/dev/null", timeout=5,
     )
     # Typical Android output: "volume is 7 in range [0..15]"
-    match = re.search(r"volume\s+is\s+(\d+)", output, re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    match = VOLUME_RE.search(output)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(3)) if match.group(3) else None
+
+
+def _adb_media_volume_get() -> int | None:
+    volume = _adb_media_volume_query()
+    return volume[0] if volume else None
 
 
 def _adb_media_volume_set(volume: int) -> bool:
@@ -348,10 +388,17 @@ def release_iisu_from_stub() -> None:
         adb_client.shell(f"am start -n {adb_client.quote(f'{package}/{STUB_ACTIVITY}')}", timeout=10)
 
 
+def _set_native_is_app(value: bool) -> None:
+    global current_native_is_app
+    with current_process_lock:
+        current_native_is_app = value
+
+
 def end_game_handoff() -> None:
     """Restore iiSU controller navigation and its previous Android volume."""
     debug_log("end_game_handoff() entered")
     global game_handoff_active, saved_android_media_volume, pending_native_quit
+    _set_native_is_app(False)
     release_iisu_from_stub()
     previous = saved_android_media_volume
     saved_android_media_volume = None
@@ -363,7 +410,30 @@ def end_game_handoff() -> None:
     print("[bridge] iiSU input/audio restored")
 
 
-def log_launch(line: str, notify: bool = False, notify_title: str = "Community-iiSU-PC") -> None:
+PROBLEM_TITLE = "Couldn't open that game"
+GAME_OVERLAY_TITLE = "Starting your game"
+
+# An emulator that exits with an error after running this long was played
+# and then closed, not a launch that failed, so it's only logged.
+FAILED_LAUNCH_SECONDS = 20
+# When the quit hotkey or chord last asked a game to close (time.monotonic()).
+# A forced quit ends the emulator with a non-zero code, which isn't a failure.
+last_quit_request = 0.0
+
+
+def exit_looks_like_failure(returncode: int | None, started: float, ended: float, quit_requested: float) -> bool:
+    """Whether an emulator's exit is worth putting on screen: a non-zero
+    code soon after launch, that nobody asked for with the quit key."""
+    if returncode in (0, None):
+        return False
+    if quit_requested >= started:
+        return False
+    return ended - started <= FAILED_LAUNCH_SECONDS
+
+
+def log_launch(
+    line: str, notify: bool = False, notify_title: str = "Community-iiSU-PC", friendly: str | None = None,
+) -> None:
     """Appends one line to launch_history.log with a timestamp, every
     launch attempt gets logged here regardless of outcome, not just
     failures, so there's always a record to check against ("did this
@@ -373,7 +443,11 @@ def log_launch(line: str, notify: bool = False, notify_title: str = "Community-i
     notify_error) for anything worth interrupting someone over, a
     failure, not a routine successful launch, since the bridge runs
     with no visible window normally and a log file nobody's looking at
-    doesn't "make the user aware" of anything by itself."""
+    doesn't "make the user aware" of anything by itself.
+
+    friendly is the same failure in plain words with where to fix it (see
+    launch_problems.py). It's what the on-screen card and the Manager's
+    Home page show; the log keeps line, the technical version."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as f:
@@ -381,11 +455,44 @@ def log_launch(line: str, notify: bool = False, notify_title: str = "Community-i
     except OSError:
         pass
     if notify:
-        boot_overlay.notify_error(notify_title, line)
+        message = friendly or line
+        launch_problems.record(notify_title if notify_title != "Community-iiSU-PC" else PROBLEM_TITLE, message, line)
+        if boot_overlay.show_problem(PROBLEM_TITLE, message) is None:
+            boot_overlay.notify_error(notify_title, message)
 
 
 def _is_waydroid(config: dict) -> bool:
     return resolve_backend(config) == BACKEND_WAYDROID
+
+
+def sync_android_theme_if_enabled(config: dict) -> None:
+    """Puts Android's dark mode (and iiSU's, where it follows the system) in
+    step with this PC's light or dark mode, each time iiSU starts. Off unless
+    ticked in Settings > General."""
+    if not config.get("sync_android_theme", False):
+        return
+    try:
+        theme, ok = system_theme.sync_android_theme(adb_client.shell)
+        log_launch(f"THEME: Android set to {theme} to match this PC" if ok else "THEME: couldn't set Android's theme")
+    except Exception as exc:
+        print(f"[bridge] couldn't set Android's theme: {exc}")
+
+
+def start_library_rescan_if_needed(config: dict) -> None:
+    """When this start's ROM sync changed the library, asks iiSU to rescan
+    it once its main screen is up (see library_rescan.py), on a thread of its
+    own so the bridge is listening for launches meanwhile."""
+    if not config.get("auto_rescan_library", True) or not library_rescan.pending():
+        return
+
+    def run() -> None:
+        if library_rescan.rescan_when_ready(adb_client.shell, log=lambda line: print(f"[bridge] {line}")):
+            library_rescan.clear()
+            log_launch("RESCAN: the library changed, so iiSU was asked to rescan it")
+        else:
+            log_launch("RESCAN: the library changed, but iiSU didn't start a rescan; trying again next start")
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def launch_iisu(config: dict) -> None:
@@ -451,7 +558,8 @@ def launch_iisu(config: dict) -> None:
             f"[bridge] iiSU started {time.monotonic() - started:.1f}s after asking "
             f"(boot animation wait {boot_wait or 0:.1f}s, am start attempt {attempt})"
         )
-        set_volume_max()
+        set_startup_volume(config)
+        route_bridge_port(config)
         return
     print(f"[bridge] could not launch iiSU ({component}):")
     print("    " + ("\n    ".join(output[-5:]) or "no answer from adb"))
@@ -497,16 +605,86 @@ NATIVE_RELAUNCH_SECONDS = 30.0
 NATIVE_RELAUNCH_WAIT_SECONDS = 10.0
 
 
-def set_volume_max() -> None:
-    """A fresh boot comes up at whatever media volume level the system
-    image defaults to (usually well below max), silent enough that
-    anything iiSU itself plays (UI sounds, trailers) needs a manual
-    volume raise inside the VM on every single boot otherwise. Repeated
-    VOLUME_UP keyevents clamp at the device's actual max regardless of
-    AOSP vs OEM MAX_VOLUME differences, so this doesn't need to know the
-    exact volume index, one `adb shell input keyevent` call with the
-    keycode repeated is enough, no need for 20 separate subprocess calls."""
-    adb_client.shell("input keyevent " + " ".join(["24"] * 20), timeout=15)
+def route_bridge_port(config: dict) -> bool:
+    """Points the Android side's port 7737 at this bridge with `adb reverse`,
+    so a launch from the patched iiSU reaches it on any Android runtime and
+    whatever port the bridge listens on. The SDK emulator also offers
+    10.0.2.2 as a way to the PC, which is all the patch used before; Waydroid
+    has no such address, so no launch ever arrived there, and a bridge moved
+    off port 7737 was never where iiSU looked.
+
+    Done after Android has finished booting (adbd restarts during a boot and
+    forgets its routes) and again on every start, since a resumed snapshot
+    remembers a route to an adb server that is no longer there."""
+    port = config.get("bridge_port", GUEST_BRIDGE_PORT)
+    serial = adb_client.target_serial()
+    args = (["-s", serial] if serial else []) + ["reverse", f"tcp:{GUEST_BRIDGE_PORT}", f"tcp:{port}"]
+    try:
+        result = subprocess.run(
+            ["adb", *args], capture_output=True, text=True, timeout=15, creationflags=subprocess_creationflags(),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"[bridge] couldn't route Android's port {GUEST_BRIDGE_PORT} to the bridge ({e})")
+        return False
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout).strip().splitlines()[-1:] or ["no reason given"]
+        print(f"[bridge] couldn't route Android's port {GUEST_BRIDGE_PORT} to the bridge ({reason[0]})")
+        return False
+    print(f"[bridge] Android's port {GUEST_BRIDGE_PORT} is routed to the bridge on port {port}")
+    return True
+
+
+# config.json's "startup_volume": the percent Android's media volume is set
+# to each time iiSU starts, or null to leave it wherever it is.
+DEFAULT_STARTUP_VOLUME = 100
+
+
+def startup_volume_percent(config: dict) -> int | None:
+    """The configured startup volume, 0 to 100, or None for "leave Android's
+    volume alone". A config from before the setting existed gets the default,
+    which is what every start did then."""
+    value = config.get("startup_volume", DEFAULT_STARTUP_VOLUME)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_STARTUP_VOLUME
+
+
+def volume_step_for(percent: int, highest_step: int) -> int:
+    """The Android volume step nearest a percent. Anything above zero keeps
+    at least one step, so a low setting is quiet, not silent."""
+    step = round(percent * highest_step / 100)
+    return max(1, step) if percent > 0 and highest_step > 0 else step
+
+
+def set_startup_volume(config: dict) -> None:
+    """A fresh Android VM comes up with its media volume at about half, so
+    everything iiSU plays is quiet until someone raises it inside the VM. This sets it to the level
+    chosen in Settings > General (100% unless changed) by asking Android's
+    audio service for that exact step.
+
+    It used to press the volume-up key 20 times instead. That could only ever
+    mean "maximum", it put Android's volume slider on screen over iiSU at
+    every start, and it overrode a level the user had picked for themselves.
+    The key presses remain only as the fallback for "100%" on a system image
+    that doesn't report its volume range."""
+    percent = startup_volume_percent(config)
+    if percent is None:
+        return
+    volume = _adb_media_volume_query()
+    if volume is not None and volume[1]:
+        current, highest = volume
+        step = volume_step_for(percent, highest)
+        if step == current or _adb_media_volume_set(step):
+            print(f"[bridge] Android media volume {percent}% (step {step} of {highest})")
+            return
+    if percent == 100:
+        adb_client.shell("input keyevent " + " ".join(["24"] * 20), timeout=15)
+        print("[bridge] Android media volume raised to its maximum")
+    else:
+        print("[bridge] couldn't read Android's volume range, leaving the volume as it is")
 
 
 def show_iisu_window(config: dict) -> None:
@@ -631,7 +809,13 @@ def wait_and_restore_iisu(
         if current_process is process:
             current_process = None
     if process.returncode not in (0, None):
-        log_launch(f"EXITED: {emulator_name} exited with code {process.returncode} (possible launch error)", notify=True, notify_title=emulator_name)
+        looks_failed = exit_looks_like_failure(process.returncode, started, time.monotonic(), last_quit_request)
+        log_launch(
+            f"EXITED: {emulator_name} exited with code {process.returncode}"
+            + (" (possible launch error)" if looks_failed else " (after play or a quit, not reported)"),
+            notify=looks_failed,
+            notify_title=emulator_name, friendly=launch_problems.emulator_exited(emulator_name, process.returncode),
+        )
     else:
         log_launch(f"EXITED: {emulator_name} exited normally")
     show_iisu_window(config)
@@ -643,7 +827,13 @@ def _register_hotkey(hotkey_config: dict, hotkey_id: int, purpose: str) -> str |
         modifiers |= MODIFIER_FLAGS.get(name.lower(), 0)
 
     key = hotkey_config.get("key", "q")
-    vk = ord(key.upper()[0])
+    # The same lookup the quit key uses. Taking the first letter turned a
+    # named key into a letter: F10 registered F, Escape registered E, and
+    # with no modifiers that took the bare letter away from every program.
+    vk = resolve_vk(key)
+    if not vk:
+        print(f"[bridge] {purpose} hotkey has no key set, not registering it")
+        return None
 
     if not user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
         print(f"[bridge] failed to register {purpose} hotkey ({'+'.join(hotkey_config.get('modifiers', []))}+{key})")
@@ -662,7 +852,10 @@ def shutdown_everything() -> None:
     rather than given a visible console, a console window for a script
     that just prints a handful of status lines and exits is pure clutter,
     unless config.json's "debug_show_console_windows" says otherwise."""
+    global last_quit_request
+    last_quit_request = time.monotonic()
     with current_process_lock:
+
         proc = current_process
         native_hwnd = current_native_window
         native_pid = current_native_pid
@@ -752,15 +945,21 @@ def quit_tap_action(label: str = "quit") -> None:
     (controller_bridge.ControllerBridge), so both trigger identical
     behavior through one code path. label is just what gets printed/
     logged to say what triggered it."""
+    global last_quit_request
+    last_quit_request = time.monotonic()
     with current_process_lock:
         proc = current_process
         native_hwnd = current_native_window
         native_pid = current_native_pid
+        native_is_app = current_native_is_app
         handoff_active = game_handoff_active
     if native_hwnd is not None and user32.IsWindow(native_hwnd):
         print(f"[bridge] {label}, quitting native game")
         log_launch(f"QUIT: {label}, native HWND {native_hwnd}, PID {native_pid}")
-        if native_pid and _pid_is_running(native_pid):
+        if native_is_app:
+            # A Windows program or Steam game: ask it to close, force later.
+            _close_native_app(native_hwnd, native_pid if native_pid and _pid_is_running(native_pid) else None)
+        elif native_pid and _pid_is_running(native_pid):
             # Once a native game has been identified, its owning PID is
             # authoritative. current_process may only be a launcher or
             # wrapper executable that remains alive beside it.
@@ -804,7 +1003,7 @@ def quit_tap_action(label: str = "quit") -> None:
         log_launch(f"QUIT: {label} during native launch handoff; queued until HWND/PID is tracked")
     else:
         print(f"[bridge] {label} with no emulator/native game running, closing iiSU and the AVD entirely...")
-        log_launch(f"QUIT: {label}, no tracked emulator/native HWND; shutting down iiSU-PC")
+        log_launch(f"QUIT: {label}, no tracked emulator/native HWND; shutting down Community-iiSU-PC")
         shutdown_everything()
 
 
@@ -824,17 +1023,83 @@ def quit_key_watcher(config: dict) -> None:
     label = "+".join([*modifier_names, key_name]).upper()
 
     print(f"[bridge] {label}: tap to quit the running emulator (or close iiSU entirely if none is running)")
+    print(
+        f"[bridge] {label}: in a Windows or Steam game, hold it for {NATIVE_QUIT_HOLD_SECONDS:g} seconds to quit "
+        "(a tap is left to the game)"
+    )
 
     was_down = False
+    down_since = 0.0
+    acted = False  # this press has already done something, or been ruled out
     while True:
         time.sleep(KEY_POLL_INTERVAL)
         is_down = _is_key_down(vk) and all(_is_key_down(m) for m in modifier_vks)
+        now = time.monotonic()
         if is_down and not was_down:
             debug_log(f"quit hotkey DOWN: {label}")
+            down_since = now
+            # Decided when the key goes down: by the time it comes back up,
+            # whatever it did in the focused program may have changed focus.
+            acted = not quit_key_applies(config, label)
+        elif is_down and not acted and native_app_running() and now - down_since >= NATIVE_QUIT_HOLD_SECONDS:
+            acted = True
+            quit_tap_action(f"{label} held")
         elif was_down and not is_down:
             debug_log(f"quit hotkey UP: {label}")
-            quit_tap_action(f"{label} tapped")
+            if not acted:
+                if native_app_running():
+                    debug_log(f"{label} tapped in a Windows/Steam game: left to the game (hold to quit)")
+                else:
+                    quit_tap_action(f"{label} tapped")
         was_down = is_down
+
+
+def native_app_running() -> bool:
+    """A Windows program or Steam game is the thing being played, or is
+    still being started (Steam can take seconds to show a window)."""
+    with current_process_lock:
+        return current_native_is_app and (
+            current_native_window is not None or current_native_pid is not None or game_handoff_active
+        )
+
+
+def quit_key_applies(config: dict, label: str = "quit key") -> bool:
+    """Whether a press of the quit key is meant for Community-iiSU-PC: the
+    window in front is iiSU or the game or emulator it started. The Manager
+    doesn't count, where Escape closes a dialog. The key is read system wide, so pressing Escape in a
+    browser, a chat or anything else while iiSU sat in the background used to
+    quit the game, or with no game running shut the whole VM down.
+
+    Says yes whenever it can't tell (no window in front, or a platform where
+    windows can't be asked), so the key never stops working by mistake. The
+    controller chord isn't checked: a controller has no window."""
+    foreground = user32.GetForegroundWindow()
+    if not foreground:
+        return True
+    foreground_pid = _window_pid(foreground)
+    if not foreground_pid:
+        return True
+    with current_process_lock:
+        proc = current_process
+        ours = {os.getpid(), current_native_pid, proc.pid if proc is not None else None}
+        handing_off = game_handoff_active and current_native_pid is None and current_native_window is None
+        emulator_exe = Path(str(proc.args[0])).name.casefold() if proc is not None and proc.poll() is None else None
+    if foreground_pid in ours:
+        return True
+    iisu_hwnd = find_window_by_title(config.get("iisu_window_title", ""))
+    if iisu_hwnd is not None and _window_pid(iisu_hwnd) == foreground_pid:
+        return True
+    name = window_process_name(foreground).casefold()
+    # The emulator's window can belong to a process it started itself.
+    if name and name == emulator_exe:
+        return True
+    if handing_off:
+        # Between asking Steam for a game and its window appearing, whatever
+        # is in front (Steam's own launch window, usually) counts as ours.
+        return True
+    debug_log(f"{label} ignored: the window in front ({name or foreground_pid}) is not iiSU or its game")
+    print(f"[bridge] {label} ignored, another program is in front ({name or 'unknown'})")
+    return False
 
 
 def _linux_key_watcher(config: dict) -> None:
@@ -960,17 +1225,17 @@ def _linux_key_watcher(config: dict) -> None:
                             quit_tap_action("Escape tapped")
 
 
-def load_windows_apps() -> dict:
+def load_pc_games() -> dict:
     """Load native Windows app mappings fresh for every launch."""
-    if not WINDOWS_APPS_PATH.is_file():
+    if not PC_GAMES_PATH.is_file():
         return {}
     try:
-        data = json.loads(WINDOWS_APPS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(PC_GAMES_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        log_launch(f"FAILED: could not read windows_apps.json ({e})", notify=True)
+        log_launch(f"FAILED: could not read pc_games.json ({e})", notify=True, friendly=launch_problems.unexpected())
         return {}
     if not isinstance(data, dict):
-        log_launch("FAILED: windows_apps.json must contain a JSON object", notify=True)
+        log_launch("FAILED: pc_games.json must contain a JSON object", notify=True, friendly=launch_problems.unexpected())
         return {}
     return {str(name).casefold(): entry for name, entry in data.items()}
 
@@ -1088,26 +1353,27 @@ def wait_and_restore_iisu_for_window(
     show_iisu_window(config)
 
 
-def launch_windows_app(app_name: str, config: dict) -> bool:
+def launch_pc_game(app_name: str, config: dict) -> bool:
     global pending_native_quit
-    """Launch a native Windows app or registered protocol URI from windows_apps.json."""
+    """Launch a native Windows app or registered protocol URI from pc_games.json."""
 
     # Defend this launch path independently as well. handle_request() normally
-    # rejects overlapping launches, but launch_windows_app() must not overwrite
+    # rejects overlapping launches, but launch_pc_game() must not overwrite
     # active process/window tracking if called from another path.
     if is_game_running():
         log_launch(
             f"IGNORED: Windows app '{app_name}' requested while a game is already running",
             notify=True,
+            friendly=launch_problems.already_running(),
             notify_title=app_name,
         )
         return True
 
-    app = load_windows_apps().get(app_name.casefold())
+    app = load_pc_games().get(app_name.casefold())
     if app is None:
         return False
     if not isinstance(app, dict):
-        log_launch(f"FAILED: Windows app '{app_name}' has an invalid config entry", notify=True)
+        log_launch(f"FAILED: Windows app '{app_name}' has an invalid config entry", notify=True, friendly=launch_problems.pc_game_misconfigured(app_name))
         return True
 
     # Backward compatibility: entries created before URI support have no
@@ -1117,6 +1383,7 @@ def launch_windows_app(app_name: str, config: dict) -> bool:
         log_launch(
             f"FAILED: Windows app '{app_name}' has unknown launch type '{launch_type}'",
             notify=True,
+            friendly=launch_problems.pc_game_misconfigured(app_name),
             notify_title=app_name,
         )
         return True
@@ -1129,41 +1396,42 @@ def launch_windows_app(app_name: str, config: dict) -> bool:
     if launch_type == "uri":
         uri_value = app.get("uri")
         if not isinstance(uri_value, str) or not uri_value.strip():
-            log_launch(f"FAILED: Windows app '{app_name}' has no URI configured", notify=True, notify_title=app_name)
+            log_launch(f"FAILED: Windows app '{app_name}' has no URI configured", notify=True, notify_title=app_name, friendly=launch_problems.pc_game_misconfigured(app_name))
             return True
         uri = uri_value.strip()
         if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://\S+$", uri):
-            log_launch(f"FAILED: Windows app '{app_name}' has an invalid protocol URI", notify=True, notify_title=app_name)
+            log_launch(f"FAILED: Windows app '{app_name}' has an invalid protocol URI", notify=True, notify_title=app_name, friendly=launch_problems.pc_game_misconfigured(app_name))
             return True
     else:
         exe_value = app.get("exe")
         if not isinstance(exe_value, str) or not exe_value.strip():
-            log_launch(f"FAILED: Windows app '{app_name}' has no executable configured", notify=True)
+            log_launch(f"FAILED: Windows app '{app_name}' has no executable configured", notify=True, friendly=launch_problems.pc_game_misconfigured(app_name))
             return True
 
         executable = Path(os.path.expandvars(os.path.expanduser(exe_value)))
         if not executable.is_file():
-            log_launch(f"FAILED: Windows app '{app_name}' executable not found: {executable}", notify=True, notify_title=app_name)
+            log_launch(f"FAILED: Windows app '{app_name}' executable not found: {executable}", notify=True, notify_title=app_name, friendly=launch_problems.pc_game_missing(app_name))
             return True
 
         configured_args = app.get("args", [])
         if not isinstance(configured_args, list) or not all(isinstance(arg, str) for arg in configured_args):
-            log_launch(f"FAILED: Windows app '{app_name}' args must be a list of strings", notify=True)
+            log_launch(f"FAILED: Windows app '{app_name}' args must be a list of strings", notify=True, friendly=launch_problems.pc_game_misconfigured(app_name))
             return True
 
         working_dir_value = app.get("working_dir")
         working_dir = Path(os.path.expandvars(os.path.expanduser(str(working_dir_value)))) if working_dir_value else executable.parent
         if not working_dir.is_dir():
-            log_launch(f"FAILED: Windows app '{app_name}' working directory not found: {working_dir}", notify=True, notify_title=app_name)
+            log_launch(f"FAILED: Windows app '{app_name}' working directory not found: {working_dir}", notify=True, notify_title=app_name, friendly=launch_problems.pc_game_missing(app_name))
             return True
 
     # Cut iiSU off immediately, before Steam or the executable is invoked.
     # Native URI launches can take seconds before their real HWND exists.
+    _set_native_is_app(True)
     begin_game_handoff()
 
     existing_windows = list_visible_windows()
     show_overlay = config.get("show_boot_overlay", True) and not config.get("debug_show_console_windows", False)
-    overlay = boot_overlay.show(f"Waiting on {app_name}...") if show_overlay else None
+    overlay = boot_overlay.show(f"Waiting on {app_name}...", title=GAME_OVERLAY_TITLE, wait_until_visible=True) if show_overlay else None
     process = None
     hwnd = None
     try:
@@ -1207,6 +1475,7 @@ def launch_windows_app(app_name: str, config: dict) -> bool:
             log_launch(
                 f"FAILED: Windows app '{app_name}' launched but no new visible window was detected",
                 notify=True,
+                friendly=launch_problems.pc_game_no_window(app_name),
                 notify_title=app_name,
             )
             if process is not None:
@@ -1259,6 +1528,7 @@ def launch_windows_app(app_name: str, config: dict) -> bool:
         log_launch(
             f"FAILED: could not launch Windows app '{app_name}' ({e})",
             notify=True,
+            friendly=launch_problems.pc_game_failed(app_name),
             notify_title=app_name,
         )
         with current_process_lock:
@@ -1274,7 +1544,7 @@ def launch_windows_app(app_name: str, config: dict) -> bool:
         recover_from_request_exception(config)
         return True
     finally:
-        boot_overlay.close(overlay)
+        boot_overlay.close_after_settle(overlay)
 
     return True
 
@@ -1284,12 +1554,13 @@ def launch_steam_game(app_id: str, config: dict) -> None:
     global current_native_window, current_native_pid, pending_native_quit
 
     # GameNative ultimately launches a normal Windows Steam game, so use the
-    # same handoff/tracking lifecycle as native URI entries from windows_apps.
+    # same handoff/tracking lifecycle as native URI entries from pc_games.
+    _set_native_is_app(True)
     begin_game_handoff()
 
     existing_windows = list_visible_windows()
     show_overlay = config.get("show_boot_overlay", True) and not config.get("debug_show_console_windows", False)
-    overlay = boot_overlay.show(f"Waiting on Steam app {app_id}...") if show_overlay else None
+    overlay = boot_overlay.show(f"Waiting on Steam app {app_id}...", title=GAME_OVERLAY_TITLE, wait_until_visible=True) if show_overlay else None
     hwnd = None
 
     try:
@@ -1315,6 +1586,7 @@ def launch_steam_game(app_id: str, config: dict) -> None:
             log_launch(
                 f"FAILED: Steam app {app_id} launched but no new visible game window was detected",
                 notify=True,
+                friendly=launch_problems.pc_game_no_window(f"Steam game {app_id}"),
             )
             show_iisu_window(config)
             return
@@ -1367,49 +1639,17 @@ def launch_steam_game(app_id: str, config: dict) -> None:
         log_launch(
             f"FAILED: could not launch Steam app {app_id} via GameNative ({e})",
             notify=True,
+            friendly=launch_problems.pc_game_failed(f"Steam game {app_id}"),
         )
         recover_from_request_exception(config)
         return
     finally:
-        boot_overlay.close(overlay)
+        boot_overlay.close_after_settle(overlay)
 
 
-def launch_package(raw_intent: str) -> str | None:
-    cmp_match = INTENT_CMP_RE.search(raw_intent)
-    return cmp_match.group(1).split("/")[0] if cmp_match else None
-
-
-def belongs_on_android(raw_intent: str, config: dict) -> bool:
-    """Whether a launch from iiSU is an Android app no PC program stands in
-    for, such as Chrome or the Play Store. iiSU sends those through the same
-    call as games, so the patch used to send them here, where they failed
-    with "no known PC emulator mapped" and could never be opened. Anything
-    this bridge would handle stays on the PC: a mapped emulator package,
-    Winlator for Windows apps, or GameNative for Steam."""
-    package = launch_package(raw_intent)
-    if package is None:
-        return True
-    if package in WINDOWS_LAUNCH_PACKAGES or package == GAMENATIVE_PACKAGE:
-        return False
-    return not any(package.startswith(prefix) for prefix in config.get("emulators", {}))
-
-
-def android_start_command(raw_intent: str) -> str | None:
-    """The `am start` that opens an app the way iiSU asked to: its component,
-    action, categories and flags, all of which Intent.toString() shows in
-    full. None when the launch names no component to start."""
-    cmp_match = INTENT_CMP_RE.search(raw_intent)
-    if not cmp_match:
-        return None
-    args = ["am", "start", "-n", cmp_match.group(1)]
-    if act := INTENT_ACT_RE.search(raw_intent):
-        args += ["-a", act.group(1)]
-    if cat := INTENT_CAT_RE.search(raw_intent):
-        for category in filter(None, (c.strip() for c in cat.group(1).split(","))):
-            args += ["-c", category]
-    if flg := INTENT_FLG_RE.search(raw_intent):
-        args += ["-f", flg.group(1)]
-    return " ".join(adb_client.quote(arg) for arg in args)
+def read_request(conn) -> str:
+    """See launch_requests.read_request; a request cut short goes to bridge_debug.log."""
+    return launch_requests.read_request(conn, log=debug_log)
 
 
 def start_on_android(raw_intent: str) -> tuple[bool, str]:
@@ -1446,7 +1686,7 @@ def answer_launch(conn, raw_intent: str) -> bool:
         if started:
             log_launch(f"ANDROID: started {package} on Android for an older iiSU patch")
         else:
-            log_launch(f"FAILED: couldn't start {package} on Android ({output})", notify=True)
+            log_launch(f"FAILED: couldn't start {package} on Android ({output})", notify=True, friendly=launch_problems.unexpected())
     return on_android
 
 
@@ -1470,6 +1710,7 @@ def handle_request(raw_intent: str) -> None:
         log_launch(
             "IGNORED: launch request while a game is already running",
             notify=True,
+            friendly=launch_problems.already_running(),
         )
         return
 
@@ -1482,7 +1723,7 @@ def handle_request(raw_intent: str) -> None:
         if package in WINDOWS_LAUNCH_PACKAGES:
             shortcut_match = re.search(r"^EXTRA:shortcut_path=(.+)$", raw_intent, re.MULTILINE)
             if not shortcut_match:
-                log_launch(f"FAILED: Windows launch from '{package}' had no shortcut_path extra", notify=True)
+                log_launch(f"FAILED: Windows launch from '{package}' had no shortcut_path extra", notify=True, friendly=launch_problems.unexpected())
                 return
 
             shortcut_path = shortcut_match.group(1).strip()
@@ -1490,11 +1731,12 @@ def handle_request(raw_intent: str) -> None:
             print(f"[bridge] Windows app requested: {app_name}")
 
             hold_iisu_behind_stub(package)
-            if not launch_windows_app(app_name, config):
+            if not launch_pc_game(app_name, config):
                 release_iisu_from_stub()
                 log_launch(
-                    f"FAILED: Windows app '{app_name}' is not registered in windows_apps.json",
+                    f"FAILED: Windows app '{app_name}' is not registered in pc_games.json",
                     notify=True,
+                    friendly=launch_problems.pc_game_not_registered(app_name),
                     notify_title=app_name,
                 )
             return
@@ -1529,7 +1771,7 @@ def handle_request(raw_intent: str) -> None:
     if package == GAMENATIVE_PACKAGE:
         app_id = extras.get("app_id")
         if app_id is None:
-            log_launch("FAILED: GameNative launch with no app_id extra, can't tell Steam what to run", notify=True)
+            log_launch("FAILED: GameNative launch with no app_id extra, can't tell Steam what to run", notify=True, friendly=launch_problems.unexpected())
             return
         log_launch(f"LAUNCHED: Steam app {app_id} via GameNative")
         hold_iisu_behind_stub(package)
@@ -1546,19 +1788,23 @@ def handle_request(raw_intent: str) -> None:
     roms_dir = Path(config["roms_dir"])
 
     if data_uri:
-        rom_filename = unquote(data_uri).rsplit("/", 1)[-1]
+        rom_address = unquote(data_uri)
     elif "ROM" in extras:
         # Already a plain filesystem path, not URI-encoded, no unquote().
-        rom_filename = extras["ROM"].rsplit("/", 1)[-1]
+        rom_address = extras["ROM"]
     elif "bootPath" in extras:
         # Kenji-NX (Switch, routed to Ryujinx) gets the ROM's URI as this extra.
-        rom_filename = unquote(extras["bootPath"]).rsplit("/", 1)[-1]
+        rom_address = unquote(extras["bootPath"])
     else:
-        rom_filename = None
+        rom_address = None
+    rom_filename = rom_address.rsplit("/", 1)[-1] if rom_address else None
 
     profile = find_emulator_for_package(package, config["emulators"], rom_filename, extras.get("LIBRETRO"))
     if profile is None:
-        log_launch(f"FAILED: no known PC emulator mapped for package '{package}' (rom '{rom_filename}')", notify=True)
+        log_launch(
+            f"FAILED: no known PC emulator mapped for package '{package}' (rom '{rom_filename}')", notify=True,
+            friendly=launch_problems.no_emulator_for_console(),
+        )
         return
 
     # Per-game settings from the Manager's Console page: another emulator,
@@ -1574,14 +1820,31 @@ def handle_request(raw_intent: str) -> None:
     executable = find_executable(profile["exe_names"], search_roots, path_cache)
     if executable is None:
         save_path_cache(path_cache)
-        log_launch(f"FAILED: none of {profile['exe_names']} found under {search_roots} (rom '{rom_filename}')", notify=True)
+        looked_for = profile["exe_names"] if IS_WINDOWS else linux_path_names(profile["exe_names"])
+        log_launch(
+            f"FAILED: none of {looked_for} found under {search_roots} (rom '{rom_filename}')", notify=True,
+            friendly=launch_problems.emulator_missing(friendly_emulator_name(Path(profile["exe_names"][0])) if profile["exe_names"] else "The emulator"),
+        )
+        return
+    if not IS_WINDOWS and not os.access(executable, os.X_OK):
+        # An AppImage or launcher script downloaded by hand. Starting it
+        # anyway failed with a bare "Permission denied".
+        log_launch(
+            f"FAILED: {executable} isn't marked as a program. Allow it to run "
+            f"(right-click > Properties > Permissions, or `chmod +x`), then launch the game again.",
+            notify=True, notify_title=friendly_emulator_name(executable),
+            friendly=launch_problems.not_runnable(friendly_emulator_name(executable)),
+        )
         return
 
     rom_path = None
     if rom_filename:
-        rom_path = find_rom(rom_filename, roms_dir, path_cache)
+        rom_path = find_rom(rom_filename, roms_dir, path_cache, rom_location_in_vm(rom_address))
         if rom_path is None:
-            log_launch(f"FAILED: rom '{rom_filename}' not found under {roms_dir}", notify=True, notify_title=friendly_emulator_name(executable))
+            log_launch(
+                f"FAILED: rom '{rom_filename}' not found under {roms_dir}", notify=True,
+                notify_title=friendly_emulator_name(executable), friendly=launch_problems.rom_missing(rom_filename),
+            )
         else:
             serial_problem = unresolved_serial_file_reason(rom_path, roms_dir)
             if serial_problem:
@@ -1603,7 +1866,7 @@ def handle_request(raw_intent: str) -> None:
     # windows is on, since a fullscreen overlay would just hide the
     # console windows that setting exists to show.
     show_overlay = config.get("show_boot_overlay", True) and not config.get("debug_show_console_windows", False)
-    overlay = boot_overlay.show(f"Waiting on {friendly_emulator_name(executable)}...") if show_overlay else None
+    overlay = boot_overlay.show(f"Waiting on {friendly_emulator_name(executable)}...", title=GAME_OVERLAY_TITLE, wait_until_visible=True) if show_overlay else None
     try:
         iisu_hwnd = find_window_by_title(config["iisu_window_title"])
         if iisu_hwnd is not None:
@@ -1638,7 +1901,7 @@ def handle_request(raw_intent: str) -> None:
         if bring_emulator_to_foreground(process.pid):
             log_launch(f"ON SCREEN: {friendly_emulator_name(executable)} {time.monotonic() - request_started:.1f}s after iiSU asked")
     finally:
-        boot_overlay.close(overlay)
+        boot_overlay.close_after_settle(overlay)
 
 
 def is_game_running() -> bool:
@@ -1725,6 +1988,11 @@ def recover_from_request_exception(config: dict) -> None:
 
 def main() -> None:
     bridge_started = time.monotonic()
+    for moved in pc_games_paths.migrate_old_names():
+        print(f"[bridge] renamed {moved}")
+    # Every line in bridge.log gets the time it was written (not in a
+    # visible debug console, see shared/log_stamp.py).
+    log_stamp.stamp_stdout()
     # Install bridge-specific crash logging only when this module is actually
     # running the bridge. The Manager imports helpers from launch_bridge and
     # must retain its own sys/threading exception hooks.
@@ -1766,22 +2034,30 @@ def main() -> None:
         lingering as an orphaned process nobody can Start again over.
 
         Listens to the adb server's device change stream instead of asking
-        every 2 seconds. A change that drops the VM is re-checked a few
-        seconds later before shutting down, since the stream also reports a
-        momentary "offline" that polling would mostly have missed. If the
-        stream breaks, falls back to asking every 2 seconds, without ever
-        starting an adb server Stop has just ended."""
+        every 2 seconds. If the stream breaks, falls back to asking every
+        2 seconds, without ever starting an adb server Stop has just ended.
+
+        A VM that is listed but "offline" is still running: a cold-booting
+        AVD sits at offline for a while, and treating that as gone made the
+        bridge shut itself down a few seconds after starting, taking iiSU's
+        launch, the controller bridge and game hand-off with it ("Bridge
+        didn't come up in time", issue #10, found by 44kitcaliber). The
+        bridge only exits once the VM has been missing from the list
+        altogether for VM_GONE_CHECKS checks in a row, about 10 seconds."""
         time.sleep(2)
 
         def vm_gone() -> bool:
-            if vm_device_connected(adb_client.devices_text(start=False)):
-                return False
-            time.sleep(3)
-            return not vm_device_connected(adb_client.devices_text(start=False))
+            for miss in range(1, VM_GONE_CHECKS + 1):
+                if vm_device_listed(adb_client.devices_text(start=False)):
+                    return False
+                debug_log(f"the VM is missing from adb's device list ({miss}/{VM_GONE_CHECKS})")
+                if miss < VM_GONE_CHECKS:
+                    time.sleep(VM_GONE_CHECK_SECONDS)
+            return True
 
         try:
             for listing in adb_client.track_devices():
-                if not vm_device_connected(listing) and vm_gone():
+                if not vm_device_listed(listing) and vm_gone():
                     break
             else:
                 raise adb_client.AdbError("the device stream ended")
@@ -1812,6 +2088,8 @@ def main() -> None:
     # restarted against an AVD that's already up.
     print("[bridge] launching iiSU...")
     launch_iisu(config)
+    sync_android_theme_if_enabled(config)
+    start_library_rescan_if_needed(config)
 
     # If the AVD is already running when the bridge starts, apply the
     # fullscreen preference to it immediately rather than waiting for the
@@ -1827,13 +2105,7 @@ def main() -> None:
         while True:
             conn, addr = server.accept()
             with conn:
-                chunks = []
-                while True:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                payload = b"".join(chunks).decode("utf-8", errors="replace")
+                payload = read_request(conn)
                 if payload:
                     if answer_launch(conn, payload):
                         continue
@@ -1847,6 +2119,7 @@ def main() -> None:
                         log_launch(
                             "FAILED: unexpected error while handling launch request",
                             notify=True,
+                            friendly=launch_problems.unexpected(),
                         )
                         # Do not force iiSU over a game that successfully
                         # launched before a later request-handling exception.

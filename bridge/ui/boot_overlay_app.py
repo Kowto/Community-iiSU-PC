@@ -7,24 +7,50 @@ any QApplication at all, and the Manager calls show()/close() from
 background threads, an in-process widget would reintroduce the "second
 GUI root from a non-owning thread" problem this design exists to avoid.
 
-Usage: python -m bridge.ui.boot_overlay_app <context> [flavor]
+Usage: python -m bridge.ui.boot_overlay_app <context> [flavor] [--status <file>]
+           [--parent-pid N] [--max-seconds N]
+
+The overlay never relies on its caller to close it. It also closes by
+itself when:
+  - the process that opened it (--parent-pid) is gone, so a crashed or
+    killed Manager/start script can't leave it stuck on screen;
+  - --max-seconds have passed;
+  - the user clicks it, or presses Escape or Alt+F4. On Windows those keys
+    are read globally, since Windows usually refuses to give a background
+    process's window keyboard focus, so a plain keyPressEvent never fires.
+
+With --status (a start, see bridge/start_progress.py) the bouncing bar becomes
+a real progress bar with a percentage and the step being worked on, read from
+that file several times a second, and the start log is shown underneath when
+the file says details are on. Without it (waiting on a game to open, where
+nothing can say how far along it is) the bar bounces as before.
 """
 
+import argparse
 import math
+import os
 import sys
+import time
+from pathlib import Path
 
 import bridge.ui  # noqa: F401; import-time side effect: puts root/bridge/installer on sys.path
 
 from shared.platform_compat import IS_WINDOWS
+from shared.qt_theme import Fonts
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit, QVBoxLayout, QWidget
+
+import start_progress
 
 # Same brand gradient used elsewhere (shared/qt_theme.py's GRADIENT_STOPS),
 # kept in sync by eye since this overlay is a standalone process with
 # its own tiny theme, not a consumer of that module.
 _GRADIENT_HEX = ["#71e0ff", "#68ccff", "#5e84ff", "#8258fa", "#c56eff"]
+
+# The problem card's title, a warm red readable on both themes.
+PROBLEM_COLOR = "#ff6b6b"
 
 _THEMES = {
     "dark": {
@@ -46,73 +72,11 @@ _THEMES = {
 }
 
 
-def _detect_linux_theme() -> str:
-    """Best-effort light/dark detection via the freedesktop desktop
-    portal (org.freedesktop.appearance color-scheme), the modern,
-    desktop-environment-agnostic standard GNOME, KDE Plasma, and most
-    others implement, so this doesn't need a separate code path per
-    desktop environment. Falls back to gsettings (GNOME/Cinnamon
-    specifically, for older setups predating the portal) and finally to
-    "dark" (matching this project's own brand theme) if neither is
-    available or the query fails for any reason, same "cosmetic, never
-    worth failing over" reasoning as the Windows registry read."""
-    import subprocess
-    try:
-        result = subprocess.run(
-            [
-                "gdbus", "call", "--session", "--dest", "org.freedesktop.portal.Desktop",
-                "--object-path", "/org/freedesktop/portal/desktop",
-                "--method", "org.freedesktop.portal.Settings.Read",
-                "org.freedesktop.appearance", "color-scheme",
-            ],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode == 0:
-            # Response embeds a uint32: 0=no preference, 1=prefer-dark, 2=prefer-light.
-            if "uint32 1" in result.stdout:
-                return "dark"
-            if "uint32 2" in result.stdout:
-                return "light"
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        result = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode == 0:
-            value = result.stdout.strip().lower()
-            # "default"/"prefer-light" both mean "no explicit dark
-            # preference", only an explicit dark string counts, same
-            # reasoning as the portal case above: a false "light" read
-            # confidently claiming a preference nobody actually set is
-            # worse than just falling through to the safe default below.
-            if "dark" in value:
-                return "dark"
-            if "light" in value:
-                return "light"
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return "dark"
-
-
 def _detect_windows_theme() -> str:
-    """Reads the same registry value Windows' own Settings > Colors page
-    ("Choose your default app mode") writes, best-effort, since a
-    loading screen guessing wrong about system theme is purely cosmetic,
-    never worth failing the boot sequence over."""
-    if not IS_WINDOWS:
-        return _detect_linux_theme()
-    import winreg
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        ) as key:
-            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-            return "light" if value else "dark"
-    except OSError:
-        return "dark"
+    """Light or dark, matching this PC (see bridge/system_theme.py)."""
+    from bridge.system_theme import detect_theme
+
+    return detect_theme()
 
 
 class _AnimatedBackground(QWidget):
@@ -187,11 +151,100 @@ class _BounceBar(QWidget):
         painter.fillRect(self._x, 0, self._fill_width, self.height(), self._theme["title"])
 
 
-class OverlayWindow(QWidget):
-    _TITLE_TEXT = "iiSU-PC Starting"
+class _ProgressBar(QWidget):
+    """A track filled from the left with the brand gradient, as far as the
+    percentage it was last given."""
 
-    def __init__(self, context: str, flavor: str):
+    def __init__(self, theme: dict, parent=None, width: int = 420, height: int = 8):
+        super().__init__(parent)
+        self._theme = theme
+        self._percent = 0.0
+        self.setFixedSize(width, height)
+
+    def set_percent(self, percent: float) -> None:
+        self._percent = max(0.0, min(100.0, percent))
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = self.height() / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._theme["track"])
+        painter.drawRoundedRect(self.rect(), radius, radius)
+        filled = int(self.width() * self._percent / 100)
+        if filled <= 0:
+            return
+        gradient = QLinearGradient(0, 0, self.width(), 0)
+        for i, hex_color in enumerate(_GRADIENT_HEX):
+            gradient.setColorAt(i / (len(_GRADIENT_HEX) - 1), QColor(hex_color))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(0, 0, max(filled, self.height()), self.height(), radius, radius)
+
+
+def _pid_alive(pid: int) -> bool:
+    if IS_WINDOWS:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _dismiss_keys_down() -> bool:
+    """Escape, or Alt+F4, held right now, regardless of which window has focus."""
+    if not IS_WINDOWS:
+        return False
+    import ctypes
+    user32 = ctypes.windll.user32
+    VK_ESCAPE, VK_MENU, VK_F4 = 0x1B, 0x12, 0x73
+
+    def down(vk: int) -> bool:
+        return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+    return down(VK_ESCAPE) or (down(VK_MENU) and down(VK_F4))
+
+
+# How often the status file is re-read and the bar moved.
+STATUS_POLL_MS = 100
+LOG_LINES_SHOWN = 14
+
+
+class OverlayWindow(QWidget):
+    _TITLE_TEXT = "Starting"
+
+    def __init__(
+        self, context: str, flavor: str, status_path: Path | None = None,
+        parent_pid: int | None = None, max_seconds: float = 0, problem: str | None = None,
+        title: str | None = None,
+    ):
+        """problem, when given, is the title of a card saying a launch
+        failed ("Couldn't open that game"), with context as the sentence
+        saying why and what to do: no bar, no animated dots."""
         super().__init__()
+        self._problem = problem
+        if problem or title:
+            self._TITLE_TEXT = problem or title
+        self._status_path = status_path
+        self._shown_percent = 0.0
+        self._shown_log: list[str] = []
         theme = _THEMES[_detect_windows_theme()]
 
         # Tool: hides it from the taskbar/Alt-Tab, you shouldn't be able
@@ -220,24 +273,57 @@ class OverlayWindow(QWidget):
         layout.setContentsMargins(48, 48, 48, 48)
 
         # Bahnschrift SemiBold (bundled with Windows 10+), not this
-        # project's usual Segoe UI, a blockier, more technical/console-ish
+        # project's usual UI font, a blockier, more technical/console-ish
         # face echoing iiSU's own branding without using any of iiSU's
         # actual (copyrighted, not ours to include) font files.
+        # The iiPC mark above the title, in place of the product's name:
+        # white on the dark theme, black on the light one. Left off the
+        # problem card.
+        if not problem:
+            from bridge.ui.widgets.brand_mark import BrandMark
+
+            mark = BrandMark(64, animated=True, ink="dark" if theme is _THEMES["light"] else "light")
+            if mark.is_available():
+                layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignHCenter)
+                layout.addSpacing(6)
+
         self._title = QLabel(self._TITLE_TEXT)
-        self._title.setFont(QFont("Bahnschrift SemiBold", 32))
-        self._title.setStyleSheet(f"color: {theme['title'].name()};")
+        self._title.setFont(Fonts.brand(32))
+        self._title.setStyleSheet(f"color: {PROBLEM_COLOR if problem else theme['title'].name()};")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._title)
 
-        context_label = QLabel(context)
-        context_label.setFont(QFont("Segoe UI Semibold", 14))
-        context_label.setStyleSheet(f"color: {theme['context'].name()};")
-        context_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(context_label)
+        self._context_label = QLabel(context)
+        self._context_label.setFont(Fonts.ui(14, semibold=True))
+        self._context_label.setStyleSheet(f"color: {theme['context'].name()};")
+        self._context_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if problem:
+            self._context_label.setWordWrap(True)
+            self._context_label.setFixedWidth(min(900, screen.geometry().width() - 160))
+            self._context_label.setMinimumHeight(self._context_label.heightForWidth(self._context_label.width()))
+        layout.addWidget(self._context_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(_BounceBar(theme, self), alignment=Qt.AlignmentFlag.AlignCenter)
+        self._progress_bar = None
+        self._percent_label = None
+        self._log_view = None
+        if problem:
+            pass
+        elif status_path is None:
+            layout.addWidget(_BounceBar(theme, self), alignment=Qt.AlignmentFlag.AlignCenter)
+        else:
+            self._progress_bar = _ProgressBar(theme, self)
+            self._progress_bar.setAccessibleName("Start progress")
+            layout.addWidget(self._progress_bar, alignment=Qt.AlignmentFlag.AlignCenter)
+            # The number as text: a bar alone says nothing to someone who
+            # can't make out how full it is, or to a screen reader.
+            self._percent_label = QLabel("0%")
+            self._percent_label.setFont(Fonts.ui(16, semibold=True))
+            self._percent_label.setStyleSheet(f"color: {theme['context'].name()};")
+            self._percent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._percent_label.setAccessibleName("Start progress in percent")
+            layout.addWidget(self._percent_label)
 
-        flavor_font = QFont("Segoe UI", 10)
+        flavor_font = Fonts.ui(10)
         flavor_font.setItalic(True)
         flavor_label = QLabel(flavor)
         flavor_label.setFont(flavor_font)
@@ -245,13 +331,125 @@ class OverlayWindow(QWidget):
         flavor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(flavor_label)
 
+        if status_path is not None:
+            # The start log, for "Show details on the loading screen". Hidden
+            # until the status file asks for it, so it costs nothing otherwise.
+            self._log_view = QPlainTextEdit()
+            self._log_view.setReadOnly(True)
+            self._log_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            self._log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self._log_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            log_font = QFont("Consolas", 10)
+            log_font.setStyleHint(QFont.StyleHint.Monospace)
+            self._log_view.setFont(log_font)
+            self._log_view.setAccessibleName("Start log")
+            width = min(1100, screen.geometry().width() - 160)
+            self._log_view.setFixedSize(width, self._log_view.fontMetrics().lineSpacing() * LOG_LINES_SHOWN + 24)
+            background = QColor(theme["track"])
+            background.setAlpha(170)
+            self._log_view.setStyleSheet(
+                f"QPlainTextEdit {{ color: {theme['context'].name()}; border: 1px solid {theme['track'].name()}; "
+                f"border-radius: 8px; padding: 8px; background-color: rgba({background.red()}, {background.green()}, "
+                f"{background.blue()}, {background.alpha()}); }}"
+            )
+            self._log_view.hide()
+            layout.addSpacing(12)
+            layout.addWidget(self._log_view, alignment=Qt.AlignmentFlag.AlignCenter)
+
+            self._status_timer = QTimer(self)
+            self._status_timer.timeout.connect(self._refresh_status)
+            self._status_timer.start(STATUS_POLL_MS)
+            self._refresh_status()
+
+        hint_label = QLabel(
+            "Closes by itself, or press Esc or click. The Manager's Home page keeps this message."
+            if problem else "Press Esc or click to hide this screen"
+        )
+        hint_label.setFont(Fonts.ui(9))
+        hint_label.setStyleSheet(f"color: {theme['flavor'].name()};")
+        hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(24)
+        layout.addWidget(hint_label)
+
+        self._parent_pid = parent_pid
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._check_parent)
+        if parent_pid:
+            self._watch_timer.start(1000)
+        if max_seconds and max_seconds > 0:
+            QTimer.singleShot(int(max_seconds * 1000), self._dismiss)
+        # Ignore keys already held when the overlay appears (e.g. the Escape
+        # that was used to quit a game a moment ago).
+        self._keys_were_down = _dismiss_keys_down()
+        self._key_timer = QTimer(self)
+        self._key_timer.timeout.connect(self._check_keys)
+        self._key_timer.start(50)
+
         # Cycles 0..3 dots on a fixed-length string (padded with trailing
         # spaces) so the label's width, and therefore its centering,
         # never jitters as the dot count changes.
         self._dot_count = 0
         self._dot_timer = QTimer(self)
         self._dot_timer.timeout.connect(self._tick_dots)
-        self._dot_timer.start(450)
+        if not problem:
+            self._dot_timer.start(450)
+
+    def _refresh_status(self) -> None:
+        """Re-reads the status file and moves the bar. The bar never goes
+        backwards, and closes a gap in a few steps, not one jump."""
+        status = start_progress.read_status(self._status_path)
+        if status is None:
+            return
+        target = start_progress.status_percent(status, time.time())
+        if target > self._shown_percent:
+            self._shown_percent = min(target, self._shown_percent + max(0.4, (target - self._shown_percent) * 0.3))
+        self._progress_bar.set_percent(self._shown_percent)
+        whole = int(self._shown_percent)
+        if self._percent_label.text() != f"{whole}%":
+            self._percent_label.setText(f"{whole}%")
+            self._progress_bar.setAccessibleDescription(f"{whole} percent")
+        label = str(status.get("label") or "")
+        if label and self._context_label.text() != label:
+            self._context_label.setText(label)
+
+        show_log = bool(status.get("details"))
+        if self._log_view.isVisible() != show_log:
+            self._log_view.setVisible(show_log)
+        log = status.get("log")
+        if show_log and isinstance(log, list):
+            lines = [str(line) for line in log[-LOG_LINES_SHOWN:]]
+            if lines != self._shown_log:
+                self._shown_log = lines
+                self._log_view.setPlainText("\n".join(lines))
+                bar = self._log_view.verticalScrollBar()
+                bar.setValue(bar.maximum())
+
+    def _dismiss(self) -> None:
+        QApplication.quit()
+
+    def _check_parent(self) -> None:
+        if self._parent_pid and not _pid_alive(self._parent_pid):
+            self._dismiss()
+
+    def _check_keys(self) -> None:
+        down = _dismiss_keys_down()
+        if down and not self._keys_were_down:
+            self._dismiss()
+        self._keys_were_down = down
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self._dismiss()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, _event) -> None:
+        self._dismiss()
+
+    def closeEvent(self, event) -> None:
+        event.accept()
+        self._dismiss()
 
     def _tick_dots(self) -> None:
         self._dot_count = (self._dot_count + 1) % 4
@@ -265,11 +463,25 @@ class OverlayWindow(QWidget):
             child.setGeometry(self.rect())
 
 
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("context", nargs="?", default="Loading...")
+    parser.add_argument("flavor", nargs="?", default="")
+    parser.add_argument("--status", type=Path, default=None)
+    parser.add_argument("--parent-pid", type=int, default=None)
+    parser.add_argument("--max-seconds", type=float, default=0)
+    parser.add_argument("--problem", default=None)
+    parser.add_argument("--ready-file", type=Path, default=None)
+    parser.add_argument("--title", default=None)
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
 def main() -> None:
-    context = sys.argv[1] if len(sys.argv) > 1 else "Loading..."
-    flavor = sys.argv[2] if len(sys.argv) > 2 else ""
-    app = QApplication(sys.argv)
-    window = OverlayWindow(context, flavor)
+    args = parse_args(sys.argv[1:])
+    app = QApplication(sys.argv[:1])
+    window = OverlayWindow(args.context, args.flavor, args.status, args.parent_pid, args.max_seconds, args.problem, args.title)
+
     if IS_WINDOWS:
         window.show()
     else:
@@ -283,7 +495,18 @@ def main() -> None:
         # a true fullscreen window on Linux regardless of display server.
         window.showFullScreen()
     window.activateWindow()
+    if args.ready_file is not None:
+        # Once the first frame is painted, tell the bridge it can hide iiSU.
+        QTimer.singleShot(60, lambda: _write_ready(args.ready_file))
     sys.exit(app.exec())
+
+
+def _write_ready(path: Path) -> None:
+    try:
+        path.write_text("ready", encoding="utf-8")
+    except OSError:
+        pass
+
 
 
 if __name__ == "__main__":

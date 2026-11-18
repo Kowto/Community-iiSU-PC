@@ -1,5 +1,5 @@
 """
-Shared dark-UI theme for Community-iiSU-PC's PySide6 front ends.
+Shared dark and light UI theme for Community-iiSU-PC's PySide6 front ends.
 
 It uses what Qt offers: real rounded corners, a native gradient brush, and a
 stylesheet Qt fully owns end to end (including dropdown popups).
@@ -10,26 +10,80 @@ iiSU's actual asset files (fonts, icons), since those are iiSU's own
 copyrighted assets and not ours to include.
 """
 
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPalette
+from pathlib import Path
 
-BG = "#141414"
-PANEL_BG = "#212124"
-PANEL_BG_HOVER = "#2a2a2e"
-TEXT = "#f2f2f4"
-TEXT_DIM = "#9a9aa2"
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPalette
+
+import json
+import os
+
+
+def _chosen_theme() -> str:
+    """"dark" or "light", picked once when this module is first imported (so
+    changing it takes a restart). IIPC_THEME wins (screenshots, tests), then
+    "manager_theme" in bridge/config.json: "dark", "light", or "system"
+    (the default), which follows Windows' app mode."""
+    choice = os.environ.get("IIPC_THEME", "").strip().lower()
+    if not choice:
+        config_path = Path(__file__).resolve().parent.parent / "bridge" / "config.json"
+        try:
+            choice = str(json.loads(config_path.read_text(encoding="utf-8")).get("manager_theme", "system")).lower()
+        except (OSError, ValueError, AttributeError):
+            choice = "system"
+    if choice in ("dark", "light"):
+        return choice
+    try:
+        from bridge.system_theme import detect_theme
+
+        return detect_theme()
+    except Exception:
+        return "dark"
+
+
+THEME = _chosen_theme()
+IS_LIGHT = THEME == "light"
+
 GRADIENT_STOPS = ["#71e0ff", "#68ccff", "#5e84ff", "#8258fa", "#c56eff"]
-GREEN = "#4fd67a"
-RED = "#ff6161"
-GRAY = "#5a5a60"
-
-# Shared by every input widget.
-INPUT_BG = "#0e0e10"
-LOG_TEXT = "#c9c9ce"
-ACCENT_BG = "#3a3a40"
-ACCENT_BG_HOVER = "#48484f"
 DIRTY_BG = "#c98a2b"
 DIRTY_BG_HOVER = "#d99a3b"
 DIRTY_TEXT = "#1a1206"
+
+if IS_LIGHT:
+    BG = "#f3f3f6"
+    PANEL_BG = "#ffffff"
+    PANEL_BG_HOVER = "#e7e8ee"
+    TEXT = "#1a1a1f"
+    TEXT_DIM = "#686872"
+    GREEN = "#1f9d4f"
+    RED = "#d63a3a"
+    AMBER = "#b5730f"
+    GRAY = "#a9a9b2"
+    INPUT_BG = "#fbfbfd"
+    LOG_TEXT = "#34343b"
+    ACCENT_BG = "#dcdde5"
+    ACCENT_BG_HOVER = "#cfd0d9"
+    # Focus and links: the gradient's cyan is too pale on white.
+    FOCUS = "#3a5ac4"
+    # The colour see-through tints are mixed from, as "r, g, b".
+    INK_RGB = "0, 0, 0"
+    SELECTED_TEXT = "#ffffff"
+else:
+    BG = "#141414"
+    PANEL_BG = "#212124"
+    PANEL_BG_HOVER = "#2a2a2e"
+    TEXT = "#f2f2f4"
+    TEXT_DIM = "#9a9aa2"
+    GREEN = "#4fd67a"
+    RED = "#ff6161"
+    AMBER = "#e8a33d"
+    GRAY = "#5a5a60"
+    INPUT_BG = "#0e0e10"
+    LOG_TEXT = "#c9c9ce"
+    ACCENT_BG = "#3a3a40"
+    ACCENT_BG_HOVER = "#48484f"
+    FOCUS = GRADIENT_STOPS[0]
+    INK_RGB = "255, 255, 255"
+    SELECTED_TEXT = "#101010"
 
 # 8/16/24px spacing scale used consistently by PageBase/Card, so no page
 # hand-tunes its own padding.
@@ -37,9 +91,33 @@ SPACING_SM = 8
 SPACING_MD = 16
 SPACING_LG = 24
 
-FONT_FAMILY_UI = "Segoe UI"
-FONT_FAMILY_UI_SEMIBOLD = "Segoe UI Semibold"
+# Lexend is bundled (shared/assets/fonts, SIL Open Font License), so the UI
+# reads the same on Windows and Linux instead of falling back to whatever
+# each desktop ships. Bahnschrift is the product name's typeface: it comes
+# with Windows 10 and later and is not ours to bundle, so where it is
+# missing the name falls back to Lexend.
+FONT_FAMILY_UI = "Lexend"
+FONT_FAMILY_BRAND = "Bahnschrift"
 FONT_FAMILY_MONO = "Consolas"
+_UI_FALLBACKS = ["Segoe UI", "Noto Sans", "DejaVu Sans"]
+_FONTS_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+_BUNDLED_FONTS = ("Lexend-Regular.ttf", "Lexend-SemiBold.ttf")
+_fonts_loaded = False
+
+
+def load_fonts() -> None:
+    """Registers the bundled UI font with Qt, once per process. Needs a
+    QGuiApplication, so it runs from apply_theme() and from the Fonts
+    factories rather than at import time. A missing file is skipped: Qt
+    then uses the next family in the list."""
+    global _fonts_loaded
+    if _fonts_loaded:
+        return
+    _fonts_loaded = True
+    for name in _BUNDLED_FONTS:
+        path = _FONTS_DIR / name
+        if path.is_file():
+            QFontDatabase.addApplicationFont(str(path))
 
 
 class Fonts:
@@ -48,16 +126,34 @@ class Fonts:
     ever called after the app is up."""
 
     @staticmethod
+    def ui(size: int, semibold: bool = False) -> QFont:
+        load_fonts()
+        font = QFont(FONT_FAMILY_UI, size)
+        font.setFamilies([FONT_FAMILY_UI, *_UI_FALLBACKS])
+        if semibold:
+            font.setWeight(QFont.Weight.DemiBold)
+        return font
+
+    @staticmethod
+    def brand(size: int) -> QFont:
+        """The product name, "Community-iiSU-PC", wherever it is shown as a title."""
+        load_fonts()
+        font = QFont(FONT_FAMILY_BRAND, size)
+        font.setFamilies([FONT_FAMILY_BRAND, FONT_FAMILY_UI, *_UI_FALLBACKS])
+        font.setWeight(QFont.Weight.DemiBold)
+        return font
+
+    @staticmethod
     def title() -> QFont:
-        return QFont(FONT_FAMILY_UI_SEMIBOLD, 20)
+        return Fonts.ui(20, semibold=True)
 
     @staticmethod
     def heading() -> QFont:
-        return QFont(FONT_FAMILY_UI_SEMIBOLD, 11)
+        return Fonts.ui(11, semibold=True)
 
     @staticmethod
     def body() -> QFont:
-        return QFont(FONT_FAMILY_UI, 10)
+        return Fonts.ui(10)
 
     @staticmethod
     def mono() -> QFont:
@@ -94,7 +190,7 @@ def build_palette() -> QPalette:
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(PANEL_BG))
     palette.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(GRADIENT_STOPS[2]))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#101010"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(SELECTED_TEXT))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(TEXT_DIM))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(TEXT_DIM))
     return palette
@@ -105,6 +201,8 @@ def build_palette() -> QPalette:
 # raw stylesheet strings through every page file:
 #   QFrame#Card                             , shared/widgets/card.py
 #   QPushButton#accent / #ghost              , primary / secondary actions
+#   QPushButton#HomePrimary / #HomeCaret     , the Home page's Start/Stop button and its menu
+#   QFrame#StatusChip                        , the Home page's status pills
 #   QPushButton[dirty="true"]                , amber "unsaved changes" Save button
 STYLESHEET = f"""
 QWidget {{
@@ -164,6 +262,88 @@ QPushButton#ghost:hover {{
 QPushButton#ghost:disabled {{
     color: {TEXT_DIM};
 }}
+QPushButton#RowButton {{
+    background-color: {PANEL_BG_HOVER};
+    color: {TEXT};
+    padding: 3px 10px;
+    border-radius: 6px;
+}}
+QPushButton#RowButton:hover {{
+    background-color: {ACCENT_BG};
+}}
+
+QPushButton#HomePrimary {{
+    border-radius: 14px;
+    padding: 10px 28px;
+    color: #0b0b12;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {GRADIENT_STOPS[0]}, stop:0.5 #7da2ff, stop:1 {GRADIENT_STOPS[4]});
+}}
+QPushButton#HomePrimary:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #9aeaff, stop:0.5 #9bb8ff, stop:1 #d592ff);
+}}
+QPushButton#HomePrimary:pressed {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #5cc4e0, stop:0.5 #6a8de6, stop:1 #ac5fe0);
+}}
+QPushButton#HomePrimary[mode="stop"] {{
+    color: {TEXT};
+    background: rgba({INK_RGB}, 0.07);
+    border: 1px solid rgba(255, 97, 97, 0.6);
+}}
+QPushButton#HomePrimary[mode="stop"]:hover {{
+    background: rgba(255, 97, 97, 0.18);
+}}
+QPushButton#HomePrimary:disabled, QPushButton#HomePrimary[mode="stop"]:disabled {{
+    color: {TEXT_DIM};
+    background: rgba({INK_RGB}, 0.07);
+    border: none;
+}}
+QPushButton#HomeCaret {{
+    border-radius: 14px;
+    padding: 0;
+    background: rgba({INK_RGB}, 0.07);
+}}
+QPushButton#HomeCaret:hover {{
+    background: rgba({INK_RGB}, 0.14);
+}}
+QPushButton:focus {{
+    color: {FOCUS};
+    background-color: {PANEL_BG_HOVER};
+}}
+QCheckBox:focus, QRadioButton:focus {{
+    color: {FOCUS};
+}}
+
+QPushButton#HelpButton {{
+
+    background-color: {PANEL_BG};
+    color: {TEXT_DIM};
+    border-radius: 15px;
+    font-weight: 600;
+    padding: 0;
+}}
+QPushButton#HelpButton:hover {{
+    background-color: {PANEL_BG_HOVER};
+    color: {TEXT};
+}}
+QFrame#ProblemCard {{
+
+    background-color: {PANEL_BG};
+    border: 1px solid rgba(255, 107, 107, 0.45);
+    border-radius: 14px;
+}}
+QFrame#StatusChip {{
+
+    background-color: rgba({INK_RGB}, 0.06);
+    border: 1px solid rgba({INK_RGB}, 0.08);
+    border-radius: 14px;
+}}
+QFrame#StatusChip QLabel {{
+    background: transparent;
+    border: none;
+}}
 QPushButton[dirty="true"] {{
     background-color: {DIRTY_BG};
     color: {DIRTY_TEXT};
@@ -179,7 +359,7 @@ QLineEdit, QTextEdit, QPlainTextEdit {{
     border-radius: 4px;
     padding: 4px 6px;
     selection-background-color: {GRADIENT_STOPS[2]};
-    selection-color: #101010;
+    selection-color: {SELECTED_TEXT};
 }}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
     border: 1px solid {GRADIENT_STOPS[2]};
@@ -219,7 +399,7 @@ QComboBox QAbstractItemView {{
     color: {TEXT};
     border: 1px solid {PANEL_BG_HOVER};
     selection-background-color: {GRADIENT_STOPS[2]};
-    selection-color: #101010;
+    selection-color: {SELECTED_TEXT};
     outline: none;
 }}
 
@@ -247,7 +427,7 @@ QTreeView::item, QTableView::item, QListView::item {{
 }}
 QTreeView::item:selected, QTableView::item:selected, QListView::item:selected {{
     background-color: {GRADIENT_STOPS[2]};
-    color: #101010;
+    color: {SELECTED_TEXT};
 }}
 QHeaderView::section {{
     background-color: {PANEL_BG};
@@ -312,7 +492,7 @@ QMenu::item {{
 }}
 QMenu::item:selected {{
     background-color: {GRADIENT_STOPS[2]};
-    color: #101010;
+    color: {SELECTED_TEXT};
 }}
 QMenu::separator {{
     height: 1px;
@@ -366,6 +546,7 @@ QPushButton#SubnavPill:checked {{
 def apply_theme(app) -> None:
     """Applies the palette, stylesheet, and default body font to a
     QApplication, called once at each entry point's startup."""
+    load_fonts()
     app.setStyle("Fusion")
     app.setPalette(build_palette())
     app.setStyleSheet(STYLESHEET)
