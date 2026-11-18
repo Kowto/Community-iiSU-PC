@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import portable_sdk  # noqa: F401; imported for its import-time PATH fix (adb), not used directly here
 from console_names import load_console_lookup, resolve_console_shortname
+from emulator_lookup import XBLA_EXTENSION, xbla_target
 from shared import adb_client
 from shared.platform_compat import subprocess_creationflags
 
@@ -224,6 +225,22 @@ def adb(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     )
 
 
+def xbla_game_folders(console_folder: Path) -> set[Path]:
+    """The game folders .xbla launcher files in console_folder point at
+    (see emulator_lookup.resolve_xbla_file). Their default.xex and assets
+    stay on the PC: the .xbla file is what iiSU lists and launches, and the
+    folder would otherwise show up in iiSU beside it."""
+    folders = set()
+    for launcher in console_folder.rglob("*"):
+        if launcher.suffix.lower() != XBLA_EXTENSION or not launcher.is_file():
+            continue
+        target = xbla_target(launcher)
+        folder = target if target.is_dir() else target.parent
+        if folder.is_dir() and folder != launcher.parent and folder != console_folder:
+            folders.add(folder)
+    return folders
+
+
 def scan_library(
     roms_dir: Path, exact: dict, by_compact: dict, dedupe_exceptions: set[str] | None = None
 ) -> tuple[dict[str, list[tuple[str, int, int]]], list[str]]:
@@ -245,9 +262,12 @@ def scan_library(
             continue
 
         listed_only = LISTED_EXTENSIONS_ONLY.get(shortname)
+        launcher_folders = xbla_game_folders(console_folder)
         by_directory: dict[Path, list[Path]] = {}
         for file_path in console_folder.rglob("*"):
             if listed_only is not None and file_path.suffix.lower() not in listed_only:
+                continue
+            if launcher_folders and any(folder in file_path.parents for folder in launcher_folders):
                 continue
             if file_path.is_dir():
                 continue
