@@ -29,6 +29,7 @@ from emulator_lookup import (  # noqa: E402
     find_rom,
     friendly_emulator_name,
     read_serial_file,
+    resolve_xbla_file,
     unresolved_serial_file_reason,
     load_path_cache,
     resolve_ps3_serial_file,
@@ -475,3 +476,45 @@ class FriendlyEmulatorNameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XblaFileTests(unittest.TestCase):
+    """A .xbla file stands in for an extracted Xbox Live Arcade game folder;
+    the bridge launches that folder's default.xex in Xenia."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        patch("builtins.print").start()
+        self.addCleanup(patch.stopall)
+        self.folder = self.root / "xbox360" / "8B359F6CA14C32B45A0E6B0989510888123D885D58"
+        self.folder.mkdir(parents=True)
+        self.xex = self.folder / "default.xex"
+        self.xex.write_bytes(b"XEX2")
+
+    def _launcher(self, data, name="Space Invaders Extreme.xbla"):
+        path = self.root / "xbox360" / name
+        path.write_bytes(data)
+        return path
+
+    def test_the_folder_name_resolves_to_its_default_xex(self):
+        for label, data in (
+            ("plain", self.folder.name.encode()),
+            ("newline", self.folder.name.encode() + b"\r\n"),
+            ("utf-16", ("\ufeff" + self.folder.name).encode("utf-16-le")),
+            ("path to the xex", (self.folder.name + "\\default.xex").encode()),
+        ):
+            with self.subTest(label):
+                self.assertEqual(resolve_xbla_file(self._launcher(data)), self.xex)
+
+    def test_an_empty_file_means_the_folder_with_the_same_name(self):
+        launcher = self._launcher(b"", name=self.folder.name + ".xbla")
+        self.assertEqual(resolve_xbla_file(launcher), self.xex)
+
+    def test_find_rom_launches_the_xex_and_a_bad_target_is_reported(self):
+        self._launcher(self.folder.name.encode())
+        cache = {"roms": {}}
+        self.assertEqual(find_rom("Space Invaders Extreme.xbla", self.root, cache), self.xex)
+        bad = self._launcher(b"NoSuchFolder", name="Bad.xbla")
+        self.assertEqual(find_rom("Bad.xbla", self.root, cache), bad)
+        self.assertIn("NoSuchFolder", unresolved_serial_file_reason(bad, self.root))

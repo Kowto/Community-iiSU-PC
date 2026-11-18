@@ -153,7 +153,7 @@ def find_rom(rom_filename: str, roms_dir: Path, cache: dict) -> Path | None:
         return None
     match = _find_by_name(roms_dir, {rom_filename}, ROM_SEARCH_MAX_DEPTH)
     if match:
-        match = resolve_ps4_serial_file(resolve_ps3_serial_file(match, roms_dir), roms_dir)
+        match = resolve_xbla_file(resolve_ps4_serial_file(resolve_ps3_serial_file(match, roms_dir), roms_dir))
         # A serial file that didn't resolve to its game isn't cached, so the
         # next launch looks again once the file or the game folder is fixed.
         if match.suffix.lower() in SERIAL_FILE_EXTENSIONS:
@@ -168,7 +168,7 @@ def find_rom(rom_filename: str, roms_dir: Path, cache: dict) -> Path | None:
 PS3_SERIAL_EXTENSION = ".ps3"
 
 
-SERIAL_FILE_EXTENSIONS = {".ps3", ".ps4", ".ps5"}
+SERIAL_FILE_EXTENSIONS = {".ps3", ".ps4", ".ps5", ".xbla"}
 _SERIAL = re.compile(r"[A-Za-z0-9_-]{4,32}")
 
 
@@ -247,6 +247,50 @@ def resolve_ps4_serial_file(path: Path, roms_dir: Path) -> Path:
     return path
 
 
+XBLA_EXTENSION = ".xbla"
+XBLA_BOOT_FILE = "default.xex"
+
+
+def xbla_target(path: Path) -> Path:
+    """The game folder or file a .xbla launcher file points at: the path on
+    its first line (relative to the .xbla file's folder, or absolute), or,
+    for an empty file, the folder next to it with the same name."""
+    try:
+        text = path.read_bytes()[:4096]
+    except OSError:
+        text = b""
+    if text.startswith((b"\xff\xfe", b"\xfe\xff")):
+        decoded = text.decode("utf-16", errors="ignore")
+    else:
+        decoded = text.decode("utf-8-sig", errors="ignore")
+    decoded = decoded.replace("\0", "").strip()
+    first = decoded.splitlines()[0].strip().strip("\"'").strip() if decoded else ""
+    if not first:
+        return path.parent / path.stem
+    return path.parent / first.replace("\\", "/")
+
+
+def resolve_xbla_file(path: Path) -> Path:
+    """Xbox Live Arcade games are an extracted folder (default.xex plus its
+    assets), often named by a long content hash, which iiSU shows as a bare
+    folder. A <name>.xbla file (an extension iiSU's Xbox 360 console lists)
+    stands in for it: it holds the folder's name, e.g.
+    8B359F6CA14C32B45A0E6B0989510888123D885D58, or a path to the .xex, and
+    is swapped for that folder's default.xex, the file Xenia boots. Empty,
+    it means the folder next to it with the same name. Anything else, or a
+    target that doesn't exist, comes back unchanged."""
+    if path.suffix.lower() != XBLA_EXTENSION:
+        return path
+    target = xbla_target(path)
+    if target.is_file():
+        return target
+    for name in (XBLA_BOOT_FILE, XBLA_BOOT_FILE.upper()):
+        if (target / name).is_file():
+            return target / name
+    print(f"[bridge] {path.name}: no {XBLA_BOOT_FILE} in {target}")
+    return path
+
+
 def unresolved_serial_file_reason(path: Path, roms_dir: Path) -> str | None:
     """Why a .ps3/.ps4 serial file find_rom handed back wasn't swapped for
     its game's boot file (find_rom returns the serial file itself then), or
@@ -254,6 +298,8 @@ def unresolved_serial_file_reason(path: Path, roms_dir: Path) -> str | None:
     broken serial file is reported plainly instead of being handed to the
     emulator, which only says "Invalid file or folder"."""
     suffix = path.suffix.lower()
+    if suffix == XBLA_EXTENSION:
+        return f"{path.name} points at {xbla_target(path)}, which has no {XBLA_BOOT_FILE}"
     if suffix not in (PS3_SERIAL_EXTENSION, PS4_SERIAL_EXTENSION):
         return None
     serial = read_serial_file(path)

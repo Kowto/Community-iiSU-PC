@@ -283,3 +283,29 @@ class InstalledGameFolderTests(unittest.TestCase):
         self.assertEqual([rel for rel, *_ in consoles["ps3"]], ["Disc Game.iso", "LittleBigPlanet.ps3"])
         self.assertEqual([rel for rel, *_ in consoles["ps4"]], ["Bloodborne.ps4"])
         self.assertEqual([rel for rel, *_ in consoles["psp"]], ["Game.cso"])
+
+
+class XblaFolderTests(unittest.TestCase):
+    """The folder a .xbla file launches stays on the PC; iiSU lists the
+    .xbla file next to the other Xbox 360 games instead."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exact, cls.by_compact = load_console_lookup()
+
+    def test_only_the_launcher_and_loose_games_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roms = Path(tmp)
+            game = roms / "xbox360" / "8B359F6CA14C32B45A0E6B0989510888123D885D58"
+            for rel in ("default.xex", "a1.png", "Media/x.bin", "sound/y.xwb"):
+                (game / rel).parent.mkdir(parents=True, exist_ok=True)
+                (game / rel).write_bytes(b"x")
+            (roms / "xbox360" / "Space Invaders Extreme.xbla").write_text(game.name)
+            (roms / "xbox360" / "Tetris - The Grand Master Ace (Japan).iso").write_bytes(b"x")
+            (roms / "xbox360" / "Loose" ).mkdir()
+            (roms / "xbox360" / "Loose" / "default.xex").write_bytes(b"x")
+            consoles, _ = scan_library(roms, self.exact, self.by_compact, dedupe_exceptions=set())
+        self.assertEqual(
+            [rel for rel, *_ in consoles["xbox360"]],
+            ["Loose/default.xex", "Space Invaders Extreme.xbla", "Tetris - The Grand Master Ace (Japan).iso"],
+        )
