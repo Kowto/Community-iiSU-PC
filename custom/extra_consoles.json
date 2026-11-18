@@ -109,6 +109,47 @@
           ]
         }
       ]
+    },
+    {
+      "shortName": "switch2",
+      "longName": "Nintendo Switch 2",
+      "alternativeNames": [
+        "Switch 2",
+        "NS2",
+        "Nintendo Switch 2"
+      ],
+      "releaseYear": "2025",
+      "releaseDate": "2025-06-05",
+      "manufacturer": "Nintendo",
+      "retroAchievementsId": "NA",
+      "romExtensions": [
+        ".xci",
+        ".XCI",
+        ".nsp",
+        ".NSP",
+        ".xcz",
+        ".XCZ",
+        ".nsz",
+        ".NSZ"
+      ],
+      "emulators": [
+        {
+          "id": "retroarch",
+          "name": "Lichii",
+          "routeType": "path",
+          "commands": [
+            {
+              "description": "Lichii (PC)",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/lichii_libretro_android.so -e ROM %ROM% --activity-clear-top"
+            }
+          ],
+          "packages": [
+            "com.retroarch",
+            "com.retroarch.aarch64",
+            "com.retroarch.ra32"
+          ]
+        }
+      ]
     }
   ]
 }

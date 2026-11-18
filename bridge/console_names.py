@@ -38,6 +38,14 @@ NAME_OVERRIDES = {
     "ps5": "ps5",
     "playstation 5": "ps5",
     "sony playstation 5": "ps5",
+    # Checked before the substring fallback, which would otherwise send a
+    # "Nintendo Switch 2" folder to the Switch 1 console.
+    "switch2": "switch2",
+    "switch 2": "switch2",
+    "switch_2": "switch2",
+    "nintendo switch 2": "switch2",
+    "nintendoswitch2": "switch2",
+    "ns2": "switch2",
 }
 
 
