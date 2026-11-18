@@ -8,6 +8,14 @@ Runs iiSU (an Android emulation frontend) inside a hardware-accelerated Android 
 
 **Waydroid on Wayland:** on a Linux Wayland session, Setup uses [Waydroid](https://waydro.id) instead of the Android SDK emulator (it skips the multi-GB emulator and system image download, and needs no KVM group setup). Waydroid draws iiSU as its own fullscreen Wayland window, so none of the KWin window handling applies and it works on GNOME too. On X11, or if you set `IISUPC_VM_BACKEND=avd` before running Setup, the SDK emulator is used as before. Setup saves the choice to `config.json` (`vm_backend`), so logging into a different session type later never switches an installed setup. This path was written against Waydroid's documented CLI and is unit-tested for its parsing and selection logic, but hasn't been run end to end on a real Waydroid install yet, so reports are welcome.
 
+## Enhancements
+
+- Bigger cache size for images and box art on the home screen (for 4K screens)
+- Out of the box Atari Jaguar CD, PS4, and PS5 support
+- .XBLA support for Xbox 360 (Xbox Live Arcade)
+- .PS4 support for PS4
+- .PS5 support for PS5
+
 ## Installing
 
 **Windows, recommended:** download `Community-iiSU-PC-Setup-<version>.exe` from the [latest release](https://github.com/MAGOOSKEE/Community-iiSU-PC/releases/latest) and run it. It bundles its own Python and Java runtimes, so you don't need either installed first.
