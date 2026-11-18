@@ -340,6 +340,11 @@ class JaguarCdRoutingTests(unittest.TestCase):
     def setUp(self):
         self.emulators = build_emulators_map()
 
+    def test_the_switch_2_console_launches_lichii_fullscreen(self):
+        profile = find_emulator_for_package("com.retroarch", self.emulators, "Game (World).xci", "lichii_libretro_android.so")
+        self.assertEqual(profile["exe_names"], ["lichii.exe", "Lichii.exe"])
+        self.assertEqual(profile["pre_args"], ["-f", "-g"])
+
     def test_the_bigpemu_choice_launches_bigpemu(self):
         profile = find_emulator_for_package("com.retroarch", self.emulators, "Myst (USA).cue", "bigpemu_libretro_android.so")
         self.assertEqual(profile["exe_names"], ["BigPEmu.exe", "bigpemu.exe"])

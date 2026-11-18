@@ -41,6 +41,13 @@ class ResolveConsoleShortnameTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(self.resolve(name), short)
 
+    def test_switch_2_folders_do_not_land_in_the_switch_console(self):
+        for name in ("switch2", "Switch 2", "Nintendo Switch 2", "NS2"):
+            with self.subTest(name=name):
+                self.assertEqual(self.resolve(name), "switch2")
+        self.assertEqual(self.resolve("switch"), "switch")
+        self.assertEqual(self.resolve("Nintendo Switch"), "switch")
+
     def test_case_insensitive(self):
         self.assertEqual(self.resolve("PLAYSTATION 1"), "psx")
 

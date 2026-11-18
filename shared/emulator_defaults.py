@@ -383,6 +383,10 @@ RETROARCH_CORE_OVERRIDES = {
     # eboot.bin (resolved from a .ps4 serial file, see emulator_lookup).
     # shadPS4: -f true opens fullscreen, -g takes the game.
     "shadps4_libretro.dll": ("ps4", ["shadPS4.exe", "shadps4.exe"], ["-f", "true", "-g"]),
+    # And for the hand-added Nintendo Switch 2 console: its only option is a
+    # RetroArch entry naming a "lichii" core, routed here to Lichii (an
+    # Eden/yuzu-based Switch 2 emulator). -f opens fullscreen, -g takes the game.
+    "lichii_libretro.dll": ("switch2", ["lichii.exe", "Lichii.exe"], ["-f", "-g"]),
 }
 
 

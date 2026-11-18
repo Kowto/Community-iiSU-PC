@@ -27,6 +27,7 @@
 - .XBLA support for Xbox 360 (Xbox Live Arcade)
 - .PS4 support for PS4
 - .PS5 support for PS5
+- Nintendo Switch 2 console, launched with Lichii
 
 ### PS3 HDD (PSN) games
 

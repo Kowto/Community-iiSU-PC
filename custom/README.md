@@ -19,13 +19,14 @@ list, which iiSU reads from the VM at
 - **Atari Jaguar CD** (`atarijaguarcd`): `.cue`/`.cdi`/`.chd`, launched with BigPEmu or RetroArch's Virtual Jaguar core (for RetroAchievements).
 - **Sony PlayStation 4** (`ps4`): `.ps4` serial files, launched with shadPS4.
 - **Sony PlayStation 5** (`ps5`): `.ps5` files; no PC emulator yet.
+- **Nintendo Switch 2** (`switch2`): `.xci`/`.nsp`/`.xcz`/`.nsz`, launched with Lichii (its only option).
 
-Each launches RetroArch with a made-up core name (`bigpemu`, `shadps4`, `ps5`)
+Each launches RetroArch with a made-up core name (`bigpemu`, `shadps4`, `ps5`, `lichii`)
 that the launch bridge turns into the PC emulator. iiSU replaces the device
 copy when an iiSU update ships a newer console list (emuladores.version.txt),
 so these entries then need adding again.
 
-The border pack needs the same three consoles, in
+The border pack needs the same consoles, in
 `/sdcard/Android/media/com.iisulauncher/iiSULauncher/assets/border_packs/default/border_pack.json`
 (images go in the same folder):
 
@@ -33,4 +34,5 @@ The border pack needs the same three consoles, in
 { "console": "atarijaguarcd", "border": "atarijaguarcd.png" , "logo": "logo_atarijaguar.png" },
 { "console": "ps4", "border": "ps4.png" , "logo": "logo_ps4.png" },
 { "console": "ps5", "border": "ps5.png" , "logo": "logo_ps5.png" },
+{ "console": "switch2", "border": "switch2.png" , "logo": "logo_switch2.png" },
 ```
