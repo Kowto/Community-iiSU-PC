@@ -1,19 +1,22 @@
-"""Home page: status card, Start/Stop, quick actions, and the live log.
+"""Home page: the mark and name, Start/Stop, status, quick actions, and the live log.
 Threading uses run_in_background() + a Signal-based log redirector, since
 Qt already marshals cross-thread signal delivery on its own, see
 bridge/ui/workers/{task_runner,log_stream}.py's docstrings."""
 
 import os
+import random
 import sys
 import traceback
 from pathlib import Path
 
 import bridge.ui  # noqa: F401; import-time side effect: puts root/bridge/installer on sys.path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -27,19 +30,66 @@ from PySide6.QtWidgets import (
 
 import start_iisu_pc
 import stop_iisu_pc
+from bridge.ui import icon_font
 from bridge.ui.pages.base import PageBase
+from bridge.ui.widgets.brand_mark import BrandMark
 from bridge.ui.widgets.card import Card
 from bridge.ui.widgets.elided_label import ElidedLabel
 from bridge.ui.widgets.gradient_background import GradientBlobBackground
+from bridge.ui.widgets.gradient_divider import GradientDivider
 from bridge.ui.widgets.status_dot import StatusDot
 from shared.platform_compat import open_uri
 from shared.vm_backend import supports_headless_boot
 from bridge.ui.workers.log_stream import LogStreamRedirector
 from bridge.ui.workers.task_runner import run_in_background
+import bridge_config
+import launch_problems
 from bridge_config import CONFIG_PATH
-from shared.qt_theme import Fonts, INPUT_BG, LOG_TEXT, TEXT_DIM
+from shared.qt_theme import Fonts, INPUT_BG, LOG_TEXT, RED, TEXT, TEXT_DIM
+
 
 STATUS_POLL_INTERVAL_MS = 2000
+HERO_LOGO_HEIGHT = 72
+
+# The line under the name. A different one each time the Manager opens.
+TAGLINES = (
+    "It's game time!",
+    "Android frontend, real PC emulators.",
+    "What are we playing today?",
+    "Ready when you are.",
+    "Pick up where you left off.",
+    "Every console, one library.",
+    "Controllers at the ready.",
+    "Press Start to play.",
+    "One more game couldn't hurt.",
+    "Your library missed you.",
+    "Insert coin.",
+    "Player one, ready.",
+    "Free play, no coins needed.",
+    "Your arcade, at home.",
+    "All your games, one place.",
+    "Your whole collection awaits.",
+    "Every console, one launcher.",
+    "Pick a game, any game.",
+    "Your games, your way.",
+    "Welcome back, player.",
+    "Good to see you again.",
+    "Let's get playing.",
+    "Time to play.",
+    "Ready to play?",
+    "Game on.",
+    "Let's go.",
+    "Ready, set, play.",
+    "Your move.",
+    "Load up and play.",
+)
+
+STEAM_SHORTCUT_NOTE = (
+    "Adds Community-iiSU-PC as a non-Steam game, for Steam's library, Big Picture or Game Mode.\n"
+    "Close Steam first, it rewrites this list on exit. The shortcut starts the VM and bridge, then\n"
+    "ends, so Steam shows it stopped while iiSU keeps running."
+)
+LAUNCH_OPTIONS_TOOLTIP = "Launch options"
 
 
 class HomePage(PageBase):
@@ -62,53 +112,44 @@ class HomePage(PageBase):
         self._background = GradientBlobBackground(self)
         self._background.lower()
 
-        self.add_header("Community-iiSU-PC", "Android frontend, real PC emulators.")
+        self.body_layout.addStretch(2)
 
-        self.body_layout.addStretch(1)
-
-        # Everything below is the one thing this page is actually for:
-        # start/stop iiSU. Status, resume-state, and log detail all used to
-        # sit here permanently as their own buttons/cards; now they're a
-        # compact status line, an Advanced Launch Options menu, and a
-        # collapsed-by-default log drawer, so the page reads as one big
-        # button rather than a control panel.
+        # One centred column: who this is (mark, name, tagline), the one
+        # thing the page is for (start/stop iiSU), then what is running.
+        # Everything else stays out of the way in the menu next to the
+        # button: what the next start will be is its tooltip, and the log
+        # drawer is a tick box in it, so the page reads as one big button
+        # rather than a control panel.
         center_col = QWidget()
         center_layout = QVBoxLayout(center_col)
         center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(10)
+        center_layout.setSpacing(0)
         center_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
-        self.status_row = QWidget()
-        status_row_layout = QHBoxLayout(self.status_row)
-        status_row_layout.setContentsMargins(0, 0, 0, 0)
-        status_row_layout.setSpacing(18)
-        status_row_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # The iiPC mark, its "ii" drifting through the brand gradient.
+        self.brand_mark = BrandMark(HERO_LOGO_HEIGHT, animated=True)
+        if self.brand_mark.is_available():
+            center_layout.addWidget(self.brand_mark, 0, Qt.AlignmentFlag.AlignHCenter)
+            center_layout.addSpacing(18)
+        else:
+            # Without the picture, the name stands in for it.
+            name_label = QLabel("Community-iiSU-PC")
+            name_label.setFont(Fonts.brand(28))
+            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            center_layout.addWidget(name_label)
+            center_layout.addSpacing(4)
 
-        avd_col = QHBoxLayout()
-        avd_col.setSpacing(6)
-        self.avd_dot = StatusDot()
-        avd_col.addWidget(self.avd_dot)
-        avd_label = QLabel("Android VM")
-        avd_label.setStyleSheet(f"color: {TEXT_DIM};")
-        avd_col.addWidget(avd_label)
-        self.avd_status_label = QLabel("checking...")
-        self.avd_status_label.setStyleSheet(f"color: {TEXT_DIM};")
-        avd_col.addWidget(self.avd_status_label)
-        status_row_layout.addLayout(avd_col)
+        self.tagline_label = QLabel(random.choice(TAGLINES))
+        self.tagline_label.setFont(Fonts.ui(11))
+        self.tagline_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.tagline_label.setStyleSheet(f"color: {TEXT_DIM};")
+        center_layout.addWidget(self.tagline_label)
+        center_layout.addSpacing(16)
 
-        bridge_col = QHBoxLayout()
-        bridge_col.setSpacing(6)
-        self.bridge_dot = StatusDot()
-        bridge_col.addWidget(self.bridge_dot)
-        bridge_label = QLabel("Launch bridge")
-        bridge_label.setStyleSheet(f"color: {TEXT_DIM};")
-        bridge_col.addWidget(bridge_label)
-        self.bridge_status_label = QLabel("checking...")
-        self.bridge_status_label.setStyleSheet(f"color: {TEXT_DIM};")
-        bridge_col.addWidget(self.bridge_status_label)
-        status_row_layout.addLayout(bridge_col)
-
-        center_layout.addWidget(self.status_row)
+        divider = GradientDivider()
+        divider.setFixedWidth(200)
+        center_layout.addWidget(divider, 0, Qt.AlignmentFlag.AlignHCenter)
+        center_layout.addSpacing(28)
 
         self.setup_intro_label = QLabel(
             "Not set up yet. Setup installs a self-contained Android VM and patches your copy "
@@ -117,63 +158,117 @@ class HomePage(PageBase):
         self.setup_intro_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.setup_intro_label.setWordWrap(True)
         self.setup_intro_label.setMaximumWidth(520)
+        self.setup_intro_label.setContentsMargins(0, 0, 0, 16)
         self.setup_intro_label.setStyleSheet(f"color: {TEXT_DIM};")
         center_layout.addWidget(self.setup_intro_label)
 
         button_row = QWidget()
         button_layout = QHBoxLayout(button_row)
         button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.setSpacing(6)
+        button_layout.setSpacing(8)
 
+        # The brand gradient while it starts something, a quiet outline
+        # while it stops it (see #HomePrimary in shared/qt_theme.py).
         self.primary_button = QPushButton("Start iiSU")
-        self.primary_button.setObjectName("accent")
-        primary_font = QFont(self.primary_button.font())
-        primary_font.setPointSize(primary_font.pointSize() + 4)
-        self.primary_button.setFont(primary_font)
-        self.primary_button.setMinimumSize(220, 56)
+        self.primary_button.setObjectName("HomePrimary")
+        self.primary_button.setFont(Fonts.ui(14, semibold=True))
+        self.primary_button.setMinimumSize(280, 58)
+        self.primary_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # A soft glow in the gradient's own blue, only while it is the
+        # bright Start button (see _restyle_primary_button).
+        self._primary_glow = QGraphicsDropShadowEffect(self.primary_button)
+        self._primary_glow.setBlurRadius(42)
+        self._primary_glow.setOffset(0, 6)
+        self._primary_glow.setColor(QColor(110, 140, 255, 120))
+        self.primary_button.setGraphicsEffect(self._primary_glow)
         button_layout.addWidget(self.primary_button)
 
-        self.advanced_button = QPushButton("▾")  # small dropdown caret
-        self.advanced_button.setObjectName("ghost")
-        self.advanced_button.setFixedSize(32, 56)
-        self.advanced_button.setToolTip("Advanced launch options")
+        # Material Icons' expand_more, like the sidebar's icons (a text "▾"
+        # rendered as a missing-glyph box where the font lacked it).
+        self.advanced_button = QPushButton()
+        self.advanced_button.setIcon(icon_font.icon("expand_more", TEXT, 28))
+        self.advanced_button.setIconSize(QSize(28, 28))
+        self.advanced_button.setObjectName("HomeCaret")
+        self.advanced_button.setFixedSize(44, 58)
+        # Says what the next start will be (see _refresh_resume_reason).
+        self.advanced_button.setToolTip(LAUNCH_OPTIONS_TOOLTIP)
+        self.advanced_button.setAccessibleName("Launch options")
         self.advanced_button.clicked.connect(self._show_advanced_menu)
         button_layout.addWidget(self.advanced_button)
 
-        center_layout.addWidget(button_row)
+        center_layout.addWidget(button_row, 0, Qt.AlignmentFlag.AlignHCenter)
+        center_layout.addSpacing(10)
 
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(4)
-        self.progress.setFixedWidth(220)
+        self.progress.setFixedWidth(332)
         self.progress.hide()
         center_layout.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignHCenter)
+        center_layout.addSpacing(10)
 
-        # One line each, cut short with the full text in the tooltip: a wrapped line
+        self.status_row = QWidget()
+        status_row_layout = QHBoxLayout(self.status_row)
+        status_row_layout.setContentsMargins(0, 0, 0, 0)
+        status_row_layout.setSpacing(10)
+        status_row_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        avd_chip, self.avd_dot, self.avd_status_label = self._status_chip("Android VM")
+        avd_chip.setToolTip("The Android system iiSU runs in, on this PC.")
+        status_row_layout.addWidget(avd_chip)
+        bridge_chip, self.bridge_dot, self.bridge_status_label = self._status_chip("Launch bridge")
+        bridge_chip.setToolTip("The part on your PC that opens a game in its PC emulator when you pick it in iiSU.")
+
+        status_row_layout.addWidget(bridge_chip)
+        center_layout.addWidget(self.status_row, 0, Qt.AlignmentFlag.AlignHCenter)
+        center_layout.addSpacing(14)
+
+        # One line, cut short with the full text in the tooltip: a wrapped line
         # here grew taller than the layout allowed for and drew over the button.
-        self.resume_reason_label = ElidedLabel(width=520)
-        self.resume_reason_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.resume_reason_label.setStyleSheet(f"color: {TEXT_DIM};")
-        center_layout.addWidget(self.resume_reason_label, 0, Qt.AlignmentFlag.AlignHCenter)
-
         self.stage_label = ElidedLabel(width=520)
         self.stage_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.stage_label.setStyleSheet(f"color: {TEXT_DIM};")
         center_layout.addWidget(self.stage_label)
+        center_layout.addSpacing(14)
+
+        # The last game that failed to open, kept after the on-screen card
+        # has gone (see bridge/launch_problems.py), until it's dismissed.
+        self.problem_card = QFrame()
+        self.problem_card.setObjectName("ProblemCard")
+        self.problem_card.setFixedWidth(540)
+        problem_layout = QVBoxLayout(self.problem_card)
+        problem_layout.setContentsMargins(16, 12, 16, 12)
+        problem_layout.setSpacing(6)
+        self.problem_title = QLabel("")
+        self.problem_title.setStyleSheet(f"color: {RED}; font-weight: 600;")
+        problem_layout.addWidget(self.problem_title)
+        self.problem_text = QLabel("")
+        self.problem_text.setWordWrap(True)
+        self.problem_text.setFixedWidth(540 - 32)
+
+        problem_layout.addWidget(self.problem_text)
+        problem_buttons = QHBoxLayout()
+        problem_buttons.addStretch(1)
+        open_history = QPushButton("Open Launch Log")
+        open_history.setObjectName("ghost")
+        open_history.clicked.connect(lambda: open_uri(str(launch_problems.LAST_PROBLEM_PATH.parent / "launch_history.log")))
+        problem_buttons.addWidget(open_history)
+        dismiss = QPushButton("Dismiss")
+        dismiss.setObjectName("ghost")
+        dismiss.clicked.connect(self._dismiss_problem)
+        problem_buttons.addWidget(dismiss)
+        problem_layout.addLayout(problem_buttons)
+        self.problem_card.hide()
+        center_layout.addWidget(self.problem_card, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.body_layout.addWidget(center_col, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.body_layout.addStretch(1)
+        self.body_layout.addStretch(3)
 
-        # Collapsed by default: the log drawer, not a permanently visible
-        # console. _run_guarded's redirector keeps appending to it whether
-        # it's shown or not, so opening it mid-run shows history, not just
-        # new output.
-        self.logs_toggle_button = QPushButton("Show Logs ▾")
-        self.logs_toggle_button.setObjectName("ghost")
-        self.logs_toggle_button.clicked.connect(self._toggle_logs_drawer)
-        self.body_layout.addWidget(self.logs_toggle_button, 0, Qt.AlignmentFlag.AlignHCenter)
-
+        # Hidden by default: the log drawer, not a permanently visible
+        # console, switched on with the Show Logs tick box in the menu next
+        # to the button. _run_guarded's redirector keeps appending to it
+        # whether it's shown or not, so opening it mid-run shows history,
+        # not just new output.
         self.log_drawer = Card()
         log_layout = QVBoxLayout(self.log_drawer)
         log_layout.setContentsMargins(10, 10, 10, 10)
@@ -183,7 +278,8 @@ class HomePage(PageBase):
         self.log_text.setStyleSheet(f"background-color: {INPUT_BG}; color: {LOG_TEXT}; border: none;")
         self.log_text.setFixedHeight(220)
         log_layout.addWidget(self.log_text)
-        self.log_drawer.setVisible(False)
+        self._logs_shown = bool((getattr(self.window, "config_data", None) or {}).get("home_show_logs", False))
+        self.log_drawer.setVisible(self._logs_shown)
         self.body_layout.addWidget(self.log_drawer)
 
         self._log_redirector = LogStreamRedirector()
@@ -195,34 +291,82 @@ class HomePage(PageBase):
         self.primary_button.clicked.connect(self._on_primary_click)
         self.refresh_home_state()
 
+    def _status_chip(self, name: str) -> tuple[QFrame, StatusDot, QLabel]:
+        """A rounded pill: a status dot, what it is, and its state."""
+        chip = QFrame()
+        chip.setObjectName("StatusChip")
+        layout = QHBoxLayout(chip)
+        layout.setContentsMargins(12, 6, 14, 6)
+        layout.setSpacing(8)
+        dot = StatusDot(size=8)
+        layout.addWidget(dot)
+        layout.addWidget(QLabel(name))
+        status_label = QLabel("checking...")
+        status_label.setStyleSheet(f"color: {TEXT_DIM};")
+        layout.addWidget(status_label)
+        return chip, dot, status_label
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._background.setGeometry(self.rect())
 
     def _show_advanced_menu(self) -> None:
+        menu = self._build_advanced_menu()
+        menu.exec(self.advanced_button.mapToGlobal(self.advanced_button.rect().bottomRight()))
+
+    def _build_advanced_menu(self) -> QMenu:
         menu = QMenu(self)
-        boot_headless = menu.addAction("Boot Headless (no window)", self._start_headless)
+        menu.setToolTipsVisible(True)
+        boot_headless = menu.addAction("Start in the Background (no window)", self._start_headless)
+        boot_headless.setToolTip("Starts Android without its window or the launch bridge, for running it unattended.")
         # Only meaningful when nothing is running yet.
         boot_headless.setEnabled(
             self.window.configured and not self.busy and not (self.window.last_bridge_up or self.window.last_avd_up)
             and supports_headless_boot(self.window.config_data)
         )
         menu.addSeparator()
+        sync_now = menu.addAction("Sync Library Now", self._sync_library_now)
+        sync_now.setToolTip("Brings new or removed games into iiSU without restarting, then has iiSU rescan.")
+        # Needs Android up and nothing else running from here.
+        sync_now.setEnabled(bool(self.window.last_avd_up) and not self.busy)
         menu.addAction("ROMs Folder", self._open_roms_folder)
         menu.addAction("Open Logs Folder", self._open_logs)
         menu.addAction("Recreate Shortcut", self._recreate_desktop_shortcut)
         menu.addSeparator()
-        menu.addAction("Clear Resume State", self._clear_resume_state)
-        menu.exec(self.advanced_button.mapToGlobal(self.advanced_button.rect().bottomRight()))
+        # Only once there is an install for the Steam shortcut to start.
+        add_to_steam = menu.addAction("Add to Steam", self._add_to_steam)
+        add_to_steam.setToolTip(STEAM_SHORTCUT_NOTE)
+        add_to_steam.setEnabled(self.window.configured)
+        remove_from_steam = menu.addAction("Remove from Steam", self._remove_from_steam)
+        remove_from_steam.setToolTip("Takes the non-Steam game Add to Steam made back out. Close Steam first.")
+        remove_from_steam.setEnabled(self.window.configured)
+        menu.addSeparator()
+        show_logs = menu.addAction("Show Logs")
+        show_logs.setCheckable(True)
+        show_logs.setChecked(self._logs_shown)
+        show_logs.setToolTip("Shows the log of what Start and Stop are doing at the bottom of this page.")
+        show_logs.toggled.connect(self.set_logs_shown)
+        menu.addSeparator()
+        forget = menu.addAction("Make Next Start a Full Restart", self._clear_resume_state)
+        forget.setToolTip("Starts Android from scratch next time instead of resuming where it left off. Try it if iiSU seems stuck.")
+        return menu
 
-    def _toggle_logs_drawer(self) -> None:
-        showing = not self.log_drawer.isVisible()
-        self.log_drawer.setVisible(showing)
-        self.logs_toggle_button.setText("Hide Logs ▴" if showing else "Show Logs ▾")
+    def set_logs_shown(self, shown: bool) -> None:
+        """Shows or hides the log drawer, and remembers it for next time."""
+        self._logs_shown = shown
+        self.log_drawer.setVisible(shown)
+        self.window.set_home_show_logs(shown)
 
     # == Home state ==
 
     def refresh_home_state(self) -> None:
+        self.setup_intro_label.setText(
+            "The settings file is damaged, so Community-iiSU-PC can't start. Your Android VM, "
+            "iiSU and your games are not affected."
+            if self.window.config_problem else
+            "Not set up yet. Setup installs a self-contained Android VM and patches your copy "
+            "of iiSU to hand game launches to PC emulators."
+        )
         self.setup_intro_label.setVisible(not self.window.configured)
         self.status_row.setVisible(self.window.configured)
         self._refresh_primary_button()
@@ -232,35 +376,40 @@ class HomePage(PageBase):
         self._refresh_resume_reason()
 
     def _refresh_resume_reason(self) -> None:
+        """What the next start will be, as the tooltip of the menu button
+        next to Start."""
+        self.advanced_button.setToolTip(self._next_start_text())
+
+    def _next_start_text(self) -> str:
         if not self.window.configured:
-            self.resume_reason_label.setText("")
-            return
+            return LAUNCH_OPTIONS_TOOLTIP
         reasons = start_iisu_pc.cold_boot_reasons(self.window.config_data)
         if not reasons:
-            text, tooltip = "Next start: quick resume", ""
-        elif len(reasons) == 1:
-            text, tooltip = f"Next start: cold boot ({reasons[0]})", ""
-        else:
-            # The full list runs off the page, so it goes in the tooltip.
-            text, tooltip = f"Next start: cold boot ({len(reasons)} things changed)", "\n".join(reasons)
-        self.resume_reason_label.setText(text)
-        self.resume_reason_label.setToolTip(tooltip)
+            return "Next start: quick (resumes where Android left off)"
+        if len(reasons) == 1:
+            return f"Next start: full restart ({reasons[0]})"
+        # One reason per line: together they are too long for one.
+        return "\n".join([f"Next start: full restart ({len(reasons)} things changed)", *reasons])
 
     def _clear_resume_state(self) -> None:
         reply = QMessageBox.question(
             self,
-            "Clear Resume State",
-            "Forces the next start to cold boot instead of resuming.\n\n"
-            "Use it if the VM is stuck after a resume. Your settings, ROMs and the VM are unaffected.",
+            "Make Next Start a Full Restart",
+            "The next start will start Android from scratch instead of resuming where it left off. "
+            "It takes a little longer.\n\n"
+            "Use it if iiSU seems stuck after starting. Your settings, games and Android are unaffected.",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
         start_iisu_pc.clear_boot_fingerprint()
         self._refresh_resume_reason()
-        QMessageBox.information(self, "Clear Resume State", "Done. The next start will cold boot.")
+        QMessageBox.information(self, "Make Next Start a Full Restart", "Done. The next start will be a full restart.")
 
     def _refresh_primary_button(self) -> None:
-        if not self.window.configured:
+        if self.window.config_problem:
+            self.primary_button.setText("Repair Settings")
+            self.primary_button.setEnabled(True)
+        elif not self.window.configured:
             running = self._setup_process is not None and self._setup_process.poll() is None
             self.primary_button.setText("Setup running..." if running else "Run Setup")
             try:
@@ -275,12 +424,24 @@ class HomePage(PageBase):
         else:
             self.primary_button.setText("Repatch iiSU" if self.window.needs_repatch() else "Start iiSU")
             self.primary_button.setEnabled(not self.busy)
+        self._restyle_primary_button()
 
     def refresh_primary_button(self) -> None:
         self._refresh_primary_button()
 
+    def _restyle_primary_button(self) -> None:
+        """Stop gets the quiet look, everything that starts something the gradient."""
+        mode = "stop" if self.primary_button.text() == "Stop" else "go"
+        if self.primary_button.property("mode") != mode:
+            self.primary_button.setProperty("mode", mode)
+            self.primary_button.style().unpolish(self.primary_button)
+            self.primary_button.style().polish(self.primary_button)
+        self._primary_glow.setEnabled(mode == "go" and self.primary_button.isEnabled())
+
     def _on_primary_click(self) -> None:
-        if not self.window.configured:
+        if self.window.config_problem:
+            self.window.offer_config_recovery()
+        elif not self.window.configured:
             self._start_setup_flow()
         elif self.window.last_bridge_up or self.window.last_avd_up:
             self._stop()
@@ -311,7 +472,7 @@ class HomePage(PageBase):
             self.window.open_repatch_wizard()
             return
         self._set_busy(True)
-        self.stage_label.setText("Starting (headless)..." if headless else "Starting...")
+        self.stage_label.setText("Starting in the background..." if headless else "Starting...")
         self._append_log("\n=== Start (headless, no window) ===\n" if headless else "\n=== Start ===\n")
         self._guarded_signals = run_in_background(
             self._run_guarded, self._on_guarded_done, self._on_guarded_error, lambda: start_iisu_pc.main(headless=headless)
@@ -328,7 +489,38 @@ class HomePage(PageBase):
         self._append_log("\n=== Stop ===\n")
         self._guarded_signals = run_in_background(self._run_guarded, self._on_guarded_done, self._on_guarded_error, stop_iisu_pc.main)
 
+    def _sync_library_now(self) -> None:
+        """The start's library sync, run on demand while iiSU is open, then
+        the rescan (see bridge/library_rescan.py). The log drawer opens so
+        there's something to watch."""
+        if self.busy:
+            return
+        self.set_logs_shown(True)
+        self._set_busy(True)
+        self._append_log("\n[manager] syncing your ROM library into Android...\n")
+        self._guarded_signals = run_in_background(
+            self._run_guarded, self._on_guarded_done, self._on_guarded_error, self._sync_and_rescan
+        )
+
+    @staticmethod
+    def _sync_and_rescan() -> None:
+        import library_rescan
+        import sync_library
+        from shared import adb_client
+
+        try:
+            sync_library.main()
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                raise
+        if not library_rescan.pending():
+            print("[manager] nothing new to rescan.")
+            return
+        if library_rescan.rescan_when_ready(adb_client.shell, timeout=30, settle=0):
+            library_rescan.clear()
+
     def _run_guarded(self, func) -> None:
+
         old_stdout = sys.stdout
         sys.stdout = self._log_redirector
         try:
@@ -408,6 +600,40 @@ class HomePage(PageBase):
         self.advanced_button.setEnabled(True)
         QMessageBox.critical(self, "Shortcut", f"Couldn't create the desktop shortcut:\n{message}")
 
+    # == Steam shortcut ==
+
+    def _add_to_steam(self) -> None:
+        from bridge.services import steam_shortcuts_service as steam
+
+        try:
+            results = steam.add_to_steam()
+        except steam.SteamShortcutError as e:
+            QMessageBox.warning(self, "Add to Steam", str(e))
+            return
+        except OSError as e:
+            QMessageBox.critical(self, "Add to Steam", f"Couldn't write Steam's shortcut list:\n\n{e}")
+            return
+        words = {"added": "Added", "updated": "Updated"}
+        summary = "\n".join(f"{words[outcome]}: {path}" for path, outcome in results)
+        QMessageBox.information(
+            self, "Add to Steam",
+            f"{summary}\n\nLook for \"{steam.SHORTCUT_NAME}\" in Steam's library. "
+            "The old shortcut list was saved as a .bak file.",
+        )
+
+    def _remove_from_steam(self) -> None:
+        from bridge.services import steam_shortcuts_service as steam
+
+        try:
+            changed = steam.remove_from_steam()
+        except steam.SteamShortcutError as e:
+            QMessageBox.warning(self, "Remove from Steam", str(e))
+            return
+        except OSError as e:
+            QMessageBox.critical(self, "Remove from Steam", f"Couldn't write Steam's shortcut list:\n\n{e}")
+            return
+        QMessageBox.information(self, "Remove from Steam", "Removed it from Steam." if changed else "It wasn't in Steam's shortcut list.")
+
     # == Status polling (called by ManagerWindow's shared timer) ==
 
     def poll_status(self) -> None:
@@ -422,10 +648,31 @@ class HomePage(PageBase):
                 bridge_up = start_iisu_pc.is_port_open(config["bridge_port"])
             except Exception:
                 pass
-        now_configured = CONFIG_PATH.is_file()
+        # A damaged file counts as not configured, the same as the window
+        # sees it. Counting it as configured made this poll reload and rebuild
+        # every settings page every two seconds for as long as it stayed damaged.
+        now_configured = CONFIG_PATH.is_file() and bridge_config.config_problem() is None
         return (avd_up, bridge_up, now_configured)
 
+    def refresh_problem(self) -> None:
+        problem = launch_problems.load()
+        if problem is None:
+            self.problem_card.hide()
+            return
+        when = launch_problems.describe_time(float(problem.get("time", 0)))
+        title = problem.get("title") or ""
+        source = f" ({title})" if title and title != "Couldn't open that game" else ""
+        self.problem_title.setText(f"A game couldn't open {when}{source}")
+        self.problem_text.setText(problem.get("message", ""))
+        self.problem_text.setToolTip(problem.get("detail", ""))
+        self.problem_card.show()
+
+    def _dismiss_problem(self) -> None:
+        launch_problems.dismiss()
+        self.problem_card.hide()
+
     def _apply_status(self, result) -> None:
+        self.refresh_problem()
         avd_up, bridge_up, now_configured = result
         self.window.last_avd_up = avd_up
         self.window.last_bridge_up = bridge_up
@@ -441,6 +688,8 @@ class HomePage(PageBase):
             self.window.refresh_nav_enabled()
             self.refresh_home_state()
             self.window.rebuild_settings_pages()
+            if self.window.config_problem and not self._hidden_for_setup:
+                self.window.offer_config_recovery()
 
         if setup_just_exited:
             self._hidden_for_setup = False

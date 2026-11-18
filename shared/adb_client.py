@@ -80,6 +80,16 @@ def _run_adb(args: list[str], timeout: float) -> subprocess.CompletedProcess:
     )
 
 
+def server_running() -> bool:
+    """Whether an adb server answers on its port right now, without starting
+    one. Half a second at most (CONNECT_TIMEOUT)."""
+    try:
+        _connect(CONNECT_TIMEOUT).close()
+    except OSError:
+        return False
+    return True
+
+
 def start_server() -> None:
     """Starts the adb server if it isn't running, the one thing that still needs
     the command line. Any `adb` command would start it implicitly before."""
@@ -121,6 +131,12 @@ def _pick_serial(serial: str | None) -> str | None:
     """The device a shell command goes to: the given serial, else ANDROID_SERIAL
     (how Waydroid runs are pinned), else the Android VM, never a phone on USB."""
     return serial or os.environ.get("ANDROID_SERIAL") or vm_device_serial(devices_text())
+
+
+def target_serial() -> str | None:
+    """The serial of the Android VM adb commands should go to, or None when
+    it can't be told (adb then picks the only device)."""
+    return _pick_serial(None)
 
 
 def shell_lines(command: str, serial: str | None = None, timeout: float = 30.0):

@@ -18,6 +18,7 @@ import threading
 import traceback
 from pathlib import Path
 
+import iisu_release
 import setup_wizard
 
 # PySide6 is this file's own GUI toolkit, has to be confirmed installed
@@ -26,19 +27,46 @@ setup_wizard.ensure_pyside6()
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPlainTextEdit, QPushButton,
-    QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QButtonGroup, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 import winapi
+from bridge.ui.widgets.brand_mark import BrandTitle
 from bridge.ui.widgets.card import Card
 from bridge.ui.widgets.gradient_divider import GradientDivider
+from bridge.ui.widgets.step_checklist import StepChecklist
 from bridge.ui.workers.log_stream import LogStreamRedirector
 from bridge.ui.workers.task_runner import run_in_background
 from shared import vm_storage
 from shared.qt_theme import Fonts, GREEN, RED, SPACING_LG, SPACING_MD, SPACING_SM, apply_theme
 
 BRIDGE_DIR = setup_wizard.BRIDGE_DIR
+
+DOWNLOAD_STAGE = "Downloading the latest iiSU release"
+
+# How much taller the window grows while the log is shown.
+LOG_HEIGHT = 280
+
+# What to expect from the slow steps, shown beside them while they run.
+# Keyed by the names shown (STAGE_NAMES' values).
+STAGE_HINTS = {
+    DOWNLOAD_STAGE: "about 130 MB",
+    "Downloading and setting up Android": "the long one: about 3 GB",
+    "Patching iiSU": "a minute or two",
+    "Moving Android into this folder": "a few minutes",
+    "Installing iiSU in Android": "starts Android, several minutes",
+}
+
+# Plainer names for Setup's own steps (installer/setup_wizard.py's
+# SETUP_STAGES); the log keeps the originals.
+STAGE_NAMES = {
+    "Setting up the Android SDK and AVD": "Downloading and setting up Android",
+    "Setting up Android tooling": "Setting up Android tools",
+    "Preparing the signing key": "Preparing to sign iiSU",
+    "Copying to the portable AVD": "Moving Android into this folder",
+    "Installing iiSU and redirector stubs": "Installing iiSU in Android",
+}
 
 
 class SetupWindow(QMainWindow):
@@ -47,11 +75,11 @@ class SetupWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Community-iiSU-PC Setup")
-        self.resize(720, 600)
-        self.setMinimumSize(620, 480)
+        self.setMinimumWidth(640)
 
         self.apk_path: Path | None = None
         self.running = False
+        self._has_run = False
         self._onboarding_process: subprocess.Popen | None = None
 
         self._log_stream = LogStreamRedirector()
@@ -59,6 +87,8 @@ class SetupWindow(QMainWindow):
         self.stage_changed.connect(self._apply_stage)
 
         self._build_ui()
+        # Just tall enough for what's on screen; Show details adds room for the log.
+        self.resize(760, self._compact_height())
         self._autodetect_apk()
 
     # == UI ==
@@ -70,9 +100,10 @@ class SetupWindow(QMainWindow):
         root.setContentsMargins(SPACING_LG - 4, 18, SPACING_LG - 4, SPACING_SM)
         root.setSpacing(SPACING_SM)
 
-        title = QLabel("Community-iiSU-PC Setup")
-        title.setFont(Fonts.title())
-        root.addWidget(title)
+        # The iiPC mark in place of the product's full name, like the
+        # Manager's sidebar ("iiPC MANAGER").
+        root.addWidget(BrandTitle("Setup", mark_height=38))
+        root.addSpacing(4)
 
         subtitle = QLabel(
             "Patches your copy of iiSU to hand game launches to PC emulators,\n"
@@ -83,7 +114,9 @@ class SetupWindow(QMainWindow):
         root.addWidget(subtitle)
 
         root.addSpacing(6)
-        root.addWidget(GradientDivider())
+        # Also the progress bar: it fills step by step once Setup starts.
+        self.progress_line = GradientDivider(height=4)
+        root.addWidget(self.progress_line)
         root.addSpacing(10)
 
         apk_card = Card()
@@ -93,9 +126,24 @@ class SetupWindow(QMainWindow):
         apk_heading.setFont(Fonts.heading())
         apk_layout.addWidget(apk_heading)
 
+        self.latest_radio = QRadioButton("Download the latest official release (from iiSU's GitHub)")
+        self.latest_radio.setToolTip(
+            "Fetches the newest non-prerelease APK from github.com/iisu-network/iiSU on your machine "
+            "and checks it against GitHub's SHA-256. Nothing is bundled with this project."
+        )
+        self.custom_radio = QRadioButton("Use my own APK (custom build or pre-release)")
+        self.latest_radio.setChecked(True)
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.latest_radio)
+        mode_group.addButton(self.custom_radio)
+        self.latest_radio.toggled.connect(self._update_mode)
+        apk_layout.addWidget(self.latest_radio)
+        apk_layout.addWidget(self.custom_radio)
+
         apk_row = QHBoxLayout()
         self.apk_label = QLabel("No APK selected.")
         self.apk_label.setProperty("role", "dim")
+        apk_row.addSpacing(22)
         apk_row.addWidget(self.apk_label, stretch=1)
         self.browse_button = QPushButton("Browse...")
         self.browse_button.clicked.connect(self._browse_apk)
@@ -103,66 +151,82 @@ class SetupWindow(QMainWindow):
         apk_layout.addLayout(apk_row)
         root.addWidget(apk_card)
 
-        vm_card = Card()
-        vm_layout = QVBoxLayout(vm_card)
-        vm_layout.setContentsMargins(SPACING_MD, SPACING_MD - 2, SPACING_MD, SPACING_MD - 2)
-        vm_heading = QLabel("Android VM")
-        vm_heading.setFont(Fonts.heading())
-        vm_layout.addWidget(vm_heading)
-
-        storage_row = QHBoxLayout()
-        storage_label = QLabel("Internal storage")
-        storage_row.addWidget(storage_label)
-        self.storage_spin = QSpinBox()
-        self.storage_spin.setRange(vm_storage.MIN_DATA_PARTITION_GB, vm_storage.MAX_DATA_PARTITION_GB)
-        self.storage_spin.setValue(vm_storage.DEFAULT_DATA_PARTITION_GB)
-        self.storage_spin.setSuffix(" GB")
-        self.storage_spin.setToolTip(
-            "The most the VM can hold. The file on your drive only grows as the VM fills, "
-            "so a bigger number costs nothing until used. Changeable later in Settings, "
-            "but that recreates the VM."
-        )
-        storage_row.addWidget(self.storage_spin)
-        storage_hint = QLabel("A maximum, not a reservation.")
-        storage_hint.setProperty("role", "dim")
-        storage_row.addWidget(storage_hint, stretch=1)
-        vm_layout.addLayout(storage_row)
-
-        self.lean_check = QCheckBox("Lean VM: remove apps iiSU doesn't need (keeps Files, Chrome, Play Store)")
-        self.lean_check.setChecked(True)
-        self.lean_check.setToolTip(
-            "Removes Maps, Photos, YouTube, Gmail and other bundled apps, installs LeanKeyboard, "
-            "and checks the VM still boots. Uses less memory and disk. Untick for a stock VM."
-        )
-        vm_layout.addWidget(self.lean_check)
-        root.addWidget(vm_card)
-
         action_row = QHBoxLayout()
         self.start_button = QPushButton("Start Setup")
         self.start_button.setObjectName("accent")
-        self.start_button.setEnabled(False)
         self.start_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.start_button.clicked.connect(self._start_setup)
         action_row.addWidget(self.start_button)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        action_row.addWidget(self.progress, stretch=1)
+        action_row.addStretch(1)
         root.addLayout(action_row)
 
-        log_card = Card()
-        log_layout = QVBoxLayout(log_card)
+        self.steps_card = Card()
+        steps_layout = QVBoxLayout(self.steps_card)
+        steps_layout.setContentsMargins(SPACING_MD, SPACING_MD - 2, SPACING_MD, SPACING_MD - 2)
+        self.checklist = StepChecklist(self._planned_steps(), STAGE_HINTS)
+        steps_layout.addWidget(self.checklist)
+        self.steps_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        root.addWidget(self.steps_card)
+
+
+        details_row = QHBoxLayout()
+        self.details_button = QPushButton("Show details")
+        self.details_button.setObjectName("ghost")
+        self.details_button.setCheckable(True)
+        self.details_button.toggled.connect(self._set_details_shown)
+        details_row.addWidget(self.details_button)
+        details_row.addStretch(1)
+        root.addLayout(details_row)
+
+        self.log_card = Card()
+        log_layout = QVBoxLayout(self.log_card)
         log_layout.setContentsMargins(SPACING_SM + 2, SPACING_SM + 2, SPACING_SM + 2, SPACING_SM + 2)
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(Fonts.mono())
         log_layout.addWidget(self.log_text)
-        root.addWidget(log_card, stretch=1)
+        self.log_text.setMinimumHeight(LOG_HEIGHT - 40)
+        root.addWidget(self.log_card, stretch=1)
+        self.log_card.setVisible(False)
 
+        self._update_mode()
         self.status_label = QLabel("Ready.")
         self.status_label.setProperty("role", "dim")
         root.addWidget(self.status_label)
+
+    def _planned_steps(self) -> list[str]:
+        """Setup's steps in the order they'll run, in plain words, with the
+        download first when Setup is fetching iiSU itself."""
+        backend = setup_wizard.preferred_backend()
+        stages = setup_wizard.WAYDROID_SETUP_STAGES if backend == setup_wizard.BACKEND_WAYDROID else setup_wizard.SETUP_STAGES
+        names = [STAGE_NAMES.get(stage, stage) for stage in stages]
+        if getattr(self, "latest_radio", None) is not None and self.latest_radio.isChecked():
+            names.insert(0, STAGE_NAMES.get(DOWNLOAD_STAGE, DOWNLOAD_STAGE))
+        return names
+
+    def _compact_height(self) -> int:
+        """The window height that fits everything but the log."""
+        layout = self.centralWidget().layout()
+        layout.activate()
+        hidden = self.log_card.isHidden()
+        self.log_card.hide()
+        layout.activate()
+        height = self.centralWidget().sizeHint().height()
+        self.log_card.setHidden(hidden)
+        return height
+
+    def _fit_height(self) -> None:
+        """Grows the window for the log while it's shown, and shrinks it back
+        to fit when it's hidden, so there's never an empty band at the bottom."""
+        target = self._compact_height() + (LOG_HEIGHT if self.log_card.isVisible() else 0)
+        self.setMinimumHeight(self._compact_height())
+        self.resize(self.width(), target)
+
+    def _set_details_shown(self, shown: bool) -> None:
+        self.log_card.setVisible(shown)
+        # After the layout has taken the change in.
+        QTimer.singleShot(0, self._fit_height)
+        self.details_button.setText("Hide details" if shown else "Show details")
 
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.status_label.setText(text)
@@ -179,6 +243,20 @@ class SetupWindow(QMainWindow):
         found = setup_wizard.find_input_apk()
         if found is not None:
             self._set_apk(found)
+            self.custom_radio.setChecked(True)
+
+    def _update_mode(self) -> None:
+        use_latest = self.latest_radio.isChecked()
+        # Before the first run only: afterwards the list keeps showing how
+        # that run went (which step failed) until Setup starts again.
+        if not self.running and not self._has_run and hasattr(self, "checklist"):
+            self.checklist.set_labels(self._planned_steps())
+            # The download step comes and goes with the APK choice.
+            QTimer.singleShot(0, self._fit_height)
+        self.browse_button.setEnabled(not use_latest and not self.running)
+        self.apk_label.setEnabled(not use_latest)
+        if not self.running:
+            self.start_button.setEnabled(use_latest or self.apk_path is not None)
 
     def _browse_apk(self) -> None:
         chosen, _filter = QFileDialog.getOpenFileName(self, "Select your iiSU APK", "", "Android APK (*.apk)")
@@ -191,8 +269,7 @@ class SetupWindow(QMainWindow):
         self.apk_label.setProperty("role", "")
         self.apk_label.style().unpolish(self.apk_label)
         self.apk_label.style().polish(self.apk_label)
-        if not self.running:
-            self.start_button.setEnabled(True)
+        self._update_mode()
 
     # == Log handling ==
 
@@ -204,29 +281,41 @@ class SetupWindow(QMainWindow):
     # == Setup run ==
 
     def _start_setup(self) -> None:
-        if self.apk_path is None or self.running:
+        use_latest = self.latest_radio.isChecked()
+        if (self.apk_path is None and not use_latest) or self.running:
             return
         self.running = True
         self.start_button.setEnabled(False)
         self.browse_button.setEnabled(False)
-        self.storage_spin.setEnabled(False)
-        self.lean_check.setEnabled(False)
-        self._set_status("Running setup. The first run can take a while (several GB)...")
-        self.progress.setRange(0, 0)
+        self.latest_radio.setEnabled(False)
+        self.custom_radio.setEnabled(False)
+        self._has_run = True
+        self._set_status("Setting up. The first run takes a while; you can leave it running.")
+
+        self.checklist.set_labels(self._planned_steps())
+        self.progress_line.set_fraction(0)
 
         self._setup_signals = run_in_background(
             self._run_setup_thread, self._on_setup_finished,
-            apk_path=self.apk_path, storage_gb=self.storage_spin.value(), lean=self.lean_check.isChecked(),
+            apk_path=None if use_latest else self.apk_path,
         )
 
-    def _run_setup_thread(self, apk_path: Path, storage_gb: int, lean: bool) -> Exception | None:
+    def _run_setup_thread(self, apk_path: Path | None) -> Exception | None:
         old_stdout = sys.stdout
         sys.stdout = self._log_stream
         error: Exception | None = None
         try:
             with setup_wizard.session_log():
                 try:
-                    setup_wizard.run_setup(apk_path, on_stage=self._on_stage, storage_gb=storage_gb, lean=lean)
+                    if apk_path is None:
+                        self._on_stage("Downloading the latest iiSU release", 1, 1)
+                        apk_path = iisu_release.download_latest(setup_wizard.INPUT_DIR)
+                    # Every install gets the lean VM with 16 GB of storage; Settings >
+                    # Storage can resize it later.
+                    setup_wizard.run_setup(
+                        apk_path, on_stage=self._on_stage,
+                        storage_gb=vm_storage.DEFAULT_DATA_PARTITION_GB, lean=True,
+                    )
                 except Exception as e:  # noqa: BLE001; surfaced to the user below, not swallowed
                     error = e
                     print(f"\n[setup] FAILED: {e}\n")
@@ -242,16 +331,30 @@ class SetupWindow(QMainWindow):
         self.stage_changed.emit(label, index, total)
 
     def _apply_stage(self, label: str, index: int, total: int) -> None:
-        self._set_status(f"Step {index}/{total}: {label}...")
+        name = STAGE_NAMES.get(label, label)
+        labels = self.checklist.labels()
+        # Every stage name is on the list; the fallback only guards a stage
+        # added to setup_wizard.py without one here.
+        row = labels.index(name) if name in labels else min(index - 1, len(labels) - 1)
+        self.checklist.start(row)
+
+        self.progress_line.set_fraction(self.checklist.done_count() / max(1, len(labels)))
+        self._set_status(f"Step {row + 1} of {len(labels)}: {name}...")
 
     def _on_setup_finished(self, error: Exception | None) -> None:
         self.running = False
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100 if error is None else 0)
-        self.browse_button.setEnabled(True)
-        self.storage_spin.setEnabled(True)
-        self.lean_check.setEnabled(True)
-        self.start_button.setEnabled(True)
+        if error is None:
+            self.checklist.finish_all()
+            self.progress_line.set_fraction(1.0)
+        else:
+            self.checklist.fail_current()
+            # What went wrong is in the log, so open it.
+            self.details_button.setChecked(True)
+            self.start_button.setText("Try Again")
+
+        self.latest_radio.setEnabled(True)
+        self.custom_radio.setEnabled(True)
+        self._update_mode()
 
         if error is None:
             self._set_status("Setup complete, opening the setup wizard...", GREEN)
@@ -286,7 +389,6 @@ class SetupWindow(QMainWindow):
         self.running = True
         self.start_button.setEnabled(False)
         self.browse_button.setEnabled(False)
-        self.progress.setRange(0, 0)
         self._set_status("Installing Waydroid...")
         self._install_signals = run_in_background(self._install_waydroid_thread, self._on_waydroid_installed, plan=plan)
 
@@ -305,11 +407,9 @@ class SetupWindow(QMainWindow):
 
     def _on_waydroid_installed(self, error: Exception | None) -> None:
         self.running = False
-        self.progress.setRange(0, 100)
         self.browse_button.setEnabled(True)
         self.start_button.setEnabled(True)
         if error is not None:
-            self.progress.setValue(0)
             self._set_status(f"Waydroid install failed: {error}", RED)
             QMessageBox.critical(self, "Couldn't install Waydroid", f"{error}\n\nSee the log for details.")
             return
@@ -327,12 +427,12 @@ class SetupWindow(QMainWindow):
                 message, title="Enable Windows Hypervisor Platform?",
                 confirm=(
                     "Enable Windows Hypervisor Platform now? This needs admin permission and "
-                    "takes effect after you restart your PC. Then re-run Setup.bat."
+                    "takes effect after you restart your PC. Then open Setup again."
                 ),
                 enable=setup_wizard.enable_hypervisor_platform,
                 enabling_message=(
                     "Enabling Hypervisor Platform (you may see a UAC prompt). "
-                    "Restart your PC when it's done, then re-run Setup.bat."
+                    "Restart your PC when it's done, then open Setup again (the Manager's Run Setup)."
                 ),
                 manual_hint='Try enabling "Windows Hypervisor Platform" yourself via "Turn Windows features on or off".',
             )
@@ -341,12 +441,12 @@ class SetupWindow(QMainWindow):
                 message, title="Add yourself to the kvm group?",
                 confirm=(
                     "Add your account to the `kvm` group now? This asks for permission and "
-                    "takes effect after you log out and back in. Then re-run Setup.sh."
+                    "takes effect after you log out and back in. Then open Setup again."
                 ),
                 enable=setup_wizard.enable_kvm_access,
                 enabling_message=(
                     "You may see a permission prompt. Log out and back in when it's done, "
-                    "then re-run Setup.sh."
+                    "then open Setup again (the Manager's Run Setup)."
                 ),
                 manual_hint="Run in a terminal: sudo usermod -aG kvm $USER, then log out and back in.",
             )

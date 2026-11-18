@@ -18,7 +18,7 @@ from console_names import load_console_lookup
 from sync_library import (
     build_placeholder_tar,
     collect_serial_file_contents,
-    merge_windows_stubs,
+    merge_pc_game_stubs,
     referenced_disc_filenames,
     scan_library,
 )
@@ -183,21 +183,68 @@ class DedupeExceptionsPersistenceTests(unittest.TestCase):
 class MergeWindowsStubsTests(unittest.TestCase):
     def test_merge_adds_windows_console(self):
         consoles = {"psx": [("Game.cue", 4096, 0)]}
-        with patch.object(sync_library, "scan_windows_stubs", return_value=[("Notepad.pcgame", 4096, 0)]):
-            merge_windows_stubs(consoles)
+        with patch.object(sync_library, "scan_pc_game_stubs", return_value=[("Notepad.pcgame", 4096, 0)]):
+            merge_pc_game_stubs(consoles)
         self.assertEqual(consoles["windows"], [("Notepad.pcgame", 4096, 0)])
 
     def test_merge_dedups_against_legacy_folder_entries(self):
         consoles = {"windows": [("Notepad.pcgame", 100, 1)]}
-        with patch.object(sync_library, "scan_windows_stubs", return_value=[("Notepad.pcgame", 4096, 2)]):
-            merge_windows_stubs(consoles)
+        with patch.object(sync_library, "scan_pc_game_stubs", return_value=[("Notepad.pcgame", 4096, 2)]):
+            merge_pc_game_stubs(consoles)
         self.assertEqual(consoles["windows"], [("Notepad.pcgame", 4096, 2)])
 
     def test_merge_is_a_noop_when_no_stubs_exist(self):
         consoles = {"psx": [("Game.cue", 4096, 0)]}
-        with patch.object(sync_library, "scan_windows_stubs", return_value=[]):
-            merge_windows_stubs(consoles)
+        with patch.object(sync_library, "scan_pc_game_stubs", return_value=[]):
+            merge_pc_game_stubs(consoles)
         self.assertNotIn("windows", consoles)
+
+
+class ExtractRetryTests(unittest.TestCase):
+    def _completed(self, code):
+        return sync_library.subprocess.CompletedProcess(["adb"], code, "", "")
+
+    def test_retries_once_when_adb_drops_the_device(self):
+        results = [self._completed(255), self._completed(0), self._completed(0)]
+        with patch.object(sync_library, "adb", side_effect=results) as adb, \
+                patch.object(sync_library.time, "sleep"):
+            result = sync_library._run_extract("tar xf x")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual([c.args[0] for c in adb.call_args_list], ["shell", "wait-for-device", "shell"])
+
+    def test_a_real_tar_error_is_not_retried(self):
+        with patch.object(sync_library, "adb", return_value=self._completed(1)) as adb:
+            result = sync_library._run_extract("tar xf x")
+        self.assertEqual(result.returncode, 1)
+        adb.assert_called_once()
+
+    def test_a_timeout_becomes_a_failure_not_a_hang(self):
+        timeout = sync_library.subprocess.TimeoutExpired("adb", 1)
+        with patch.object(sync_library, "adb", side_effect=timeout):
+            result = sync_library._run_extract("tar xf x")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_the_time_limit_grows_with_the_library(self):
+        self.assertEqual(sync_library.extract_timeout(0), sync_library.ADB_EXTRACT_TIMEOUT)
+        # 100,000 placeholders at the measured 70 files a second take about 1,430s.
+        self.assertGreater(sync_library.extract_timeout(100_000), 1430)
+
+    def test_the_grown_limit_reaches_adb(self):
+        with patch.object(sync_library, "adb", return_value=self._completed(0)) as adb:
+            sync_library._run_extract("tar xf x", timeout=sync_library.extract_timeout(50_000))
+        self.assertEqual(adb.call_args.kwargs["timeout"], 1600)
+
+
+class ExtractCommandTests(unittest.TestCase):
+    def test_old_tree_is_moved_aside_and_deleted_in_the_background(self):
+        cmd = sync_library.build_extract_command()
+        move = cmd.index("mv /sdcard/Roms /sdcard/.Roms_old_")
+        extract = cmd.index("tar xf")
+        background_rm = cmd.index("setsid nohup sh -c 'rm -rf /sdcard/.Roms_old_*'")
+        self.assertLess(move, extract)
+        self.assertLess(extract, background_rm)
+        self.assertTrue(cmd.rstrip().endswith("exit $rc"))
+        self.assertNotIn("rm -rf /sdcard/Roms &&", cmd)
 
 
 if __name__ == "__main__":

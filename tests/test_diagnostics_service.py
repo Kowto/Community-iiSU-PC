@@ -9,6 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "bridge"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from services import diagnostics_service as svc
 
@@ -68,7 +69,7 @@ class VmStorageCheckTests(unittest.TestCase):
         self.assertEqual((status, name), ("ERROR", "Android VM storage"))
         self.assertIn("database or disk is full", details)
         self.assertIn("6 GB", details)
-        self.assertIn("If the VM runs out of internal storage", details)
+        self.assertIn("Settings > Storage", details)
 
     def test_low_disk_is_a_warning(self):
         self.assertEqual(svc.vm_storage_check(self.LOW, configured_gb=16.0)[0], "WARNING")
@@ -76,11 +77,11 @@ class VmStorageCheckTests(unittest.TestCase):
     def test_healthy_disk_is_ok_and_needs_no_advice(self):
         status, _name, details = svc.vm_storage_check(self.FINE, configured_gb=16.0)
         self.assertEqual(status, "OK")
-        self.assertNotIn("README", details)
+        self.assertNotIn("Settings > Storage", details)
 
     def test_no_partition_advice_when_it_is_already_big_or_unknown(self):
-        self.assertNotIn("README", svc.vm_storage_check(self.FULL, configured_gb=16.0)[2])
-        self.assertNotIn("README", svc.vm_storage_check(self.FULL, configured_gb=None)[2])
+        self.assertNotIn("Settings > Storage", svc.vm_storage_check(self.FULL, configured_gb=16.0)[2])
+        self.assertNotIn("Settings > Storage", svc.vm_storage_check(self.FULL, configured_gb=None)[2])
 
     def test_unreadable_output_is_a_warning_not_a_crash(self):
         self.assertEqual(svc.vm_storage_check("")[0], "WARNING")
@@ -89,3 +90,40 @@ class VmStorageCheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportAndFixTests(unittest.TestCase):
+    def test_redact_removes_home_and_user(self):
+        text = svc.redact(r"C:\Users\Alice\ROMs and alice wrote this", home=r"C:\Users\Alice", user="alice")
+        self.assertEqual(text, "~\ROMs and <user> wrote this")
+
+    def test_redact_handles_forward_slashes(self):
+        self.assertEqual(svc.redact("C:/Users/Alice/x", home=r"C:\Users\Alice", user=""), "~/x")
+
+    def test_report_lists_problems_first(self):
+        report = svc.report_text(
+            [("OK", "a", "fine"), ("ERROR", "b", "broken"), ("WARNING", "c", "hmm")], home="/nowhere", user=""
+        )
+        lines = report.splitlines()
+        self.assertTrue(lines[2].startswith("[ERROR] b"))
+        self.assertTrue(lines[3].startswith("[WARNING] c"))
+
+    def test_fixes_only_for_problems(self):
+        self.assertIsNone(svc.fix_for("OK", "ROMs directory"))
+        self.assertEqual(svc.fix_for("WARNING", "ROMs directory")[0], "roms")
+        self.assertIsNone(svc.fix_for("ERROR", "Something unknown"))
+
+    def test_emulators_check(self):
+        import tempfile
+
+        from shared.emulator_defaults import build_emulators_map
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "ps2").mkdir()
+            (Path(tmp) / "ps2" / "game.iso").write_text("x")
+            config = {"roms_dir": tmp, "search_roots": [], "emulators": build_emulators_map()}
+            status, check, details = svc.emulators_check(config, finder=lambda names, roots, cache: None)
+            self.assertEqual(status, "WARNING")
+            self.assertIn("PCSX2", details)
+            status, _, _ = svc.emulators_check(config, finder=lambda names, roots, cache: Path("x.exe"))
+            self.assertEqual(status, "OK")

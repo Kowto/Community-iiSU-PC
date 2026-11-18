@@ -1,8 +1,8 @@
-"""Windows Apps page. Backed entirely by bridge/services/windows_apps_service.py;
+"""Windows Apps page. Backed entirely by bridge/services/pc_games_service.py;
 this file is "wire a service call to a signal/slot".
 
 Not implemented, deliberately deferred rather than half-built: drag-and-drop,
-inline Steam search with fetched box-art thumbnails (WindowsAppDialog uses a
+inline Steam search with fetched box-art thumbnails (PcGameDialog uses a
 simple picker dialog instead), and a Refresh Artwork feature. All cosmetic,
 none block using the page."""
 
@@ -30,10 +30,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bridge.services import windows_apps_service as svc
+from bridge.services import pc_games_service as svc
 from bridge.ui.dialogs.steam_library_dialog import SteamLibraryDialog
-from bridge.ui.dialogs.windows_app_dialog import WindowsAppDialog
-from bridge.ui.dialogs.windows_apps_health_dialog import WindowsAppsHealthDialog
+from bridge.ui.dialogs.pc_game_dialog import PcGameDialog
+from bridge.ui.dialogs.pc_games_health_dialog import PcGamesHealthDialog
 from bridge.ui.pages.base import PageBase
 from shared.platform_compat import open_uri
 from bridge.ui.widgets.card import Card
@@ -41,14 +41,14 @@ from bridge.ui.workers.task_runner import run_in_background
 from shared.qt_theme import Fonts, TEXT_DIM
 
 
-class WindowsAppsPage(PageBase):
+class PcGamesPage(PageBase):
     def __init__(self, window, parent=None):
         super().__init__(parent, scrollable_body=False)
         self.window = window
         self._sort_column = "name"
         self._sort_reverse = False
 
-        self.add_header("Windows Apps", "Native executables, Steam games, and registered Windows protocol links in iiSU.")
+        self.add_header("PC Apps and Games", "Native programs, Steam games, and registered protocol links in iiSU.")
 
         steam_card = Card()
         steam_layout = QHBoxLayout(steam_card)
@@ -101,18 +101,30 @@ class WindowsAppsPage(PageBase):
         action_row_layout.setContentsMargins(0, 0, 0, 0)
         add_button = QPushButton("Add Application...")
         add_button.setObjectName("accent")
-        add_button.clicked.connect(self._add_windows_app)
+        add_button.clicked.connect(self._add_pc_game)
         action_row_layout.addWidget(add_button)
         more_button = QPushButton("More...")
         more_button.setObjectName("ghost")
         more_button.clicked.connect(lambda: self._show_more_menu(more_button))
         action_row_layout.addWidget(more_button)
+        # The everyday actions on the selection, always on screen and greyed
+        # out until something is selected; the right-click menu has them too.
+        self.test_button = QPushButton("Test")
+        self.test_button.setObjectName("ghost")
+        self.test_button.setToolTip("Launches the selected game here, as iiSU would.")
+        self.test_button.clicked.connect(self._test_pc_game)
+        action_row_layout.addWidget(self.test_button)
+        self.edit_button = QPushButton("Edit...")
+        self.edit_button.setObjectName("ghost")
+        self.edit_button.clicked.connect(self._edit_pc_game)
+        action_row_layout.addWidget(self.edit_button)
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setObjectName("ghost")
+        self.remove_button.clicked.connect(self._remove_pc_game)
+        action_row_layout.addWidget(self.remove_button)
         action_row_layout.addStretch(1)
-        # Edit/Remove Selected/Test used to duplicate the right-click menu
-        # below as always-visible buttons, same convention as every other
-        # list page now: those actions live only in the context menu, this
-        # is just a status hint.
         self.selection_hint = QLabel("")
+
         self.selection_hint.setStyleSheet(f"color: {TEXT_DIM};")
         action_row_layout.addWidget(self.selection_hint)
         self.body_layout.addWidget(action_row)
@@ -126,7 +138,7 @@ class WindowsAppsPage(PageBase):
         self.tree.setColumnWidth(2, 260)
         self.tree.setColumnWidth(3, 110)
         self.tree.setColumnWidth(4, 140)
-        self.tree.itemDoubleClicked.connect(lambda *_: self._edit_windows_app())
+        self.tree.itemDoubleClicked.connect(lambda *_: self._edit_pc_game())
         self.tree.itemSelectionChanged.connect(self._update_selection_hint)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
@@ -139,16 +151,17 @@ class WindowsAppsPage(PageBase):
 
     def _update_selection_hint(self) -> None:
         count = len(self.tree.selectedItems())
-        if count:
-            self.selection_hint.setText(f"{count} selected, right-click for actions.")
-        else:
-            self.selection_hint.setText("Select row(s), then right-click for actions.")
+        self.test_button.setEnabled(count == 1)
+        self.edit_button.setEnabled(count == 1)
+        self.remove_button.setEnabled(count > 0)
+        self.selection_hint.setText(f"{count} selected" if count else "")
+
 
     # == Data ==
 
     def _windows_dir(self):
-        svc.migrate_legacy_windows_stubs(self.window.config_data.get("roms_dir", ""))
-        return svc.WINDOWS_STUBS_DIR
+        svc.migrate_legacy_pc_game_stubs(self.window.config_data.get("roms_dir", ""))
+        return svc.PC_GAME_STUBS_DIR
 
     def reload_from_config(self) -> None:
         self._refresh_tree()
@@ -163,16 +176,16 @@ class WindowsAppsPage(PageBase):
         self.tree.clear()
 
         query = self.search_edit.text().strip().casefold()
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         installed_steam_ids = svc.installed_steam_ids()
         rows = list(apps.items())
 
         def sort_key(pair):
             name, entry = pair
             entry = entry if isinstance(entry, dict) else {}
-            display_type = svc.windows_app_display_type(entry) if entry else "Invalid"
-            status = svc.windows_app_status(name, entry, installed_steam_ids)
-            return svc.windows_app_sort_key(self._sort_column, name, entry, display_type, status)
+            display_type = svc.pc_game_display_type(entry) if entry else "Invalid"
+            status = svc.pc_game_status(name, entry, installed_steam_ids)
+            return svc.pc_game_sort_key(self._sort_column, name, entry, display_type, status)
 
         rows.sort(key=sort_key, reverse=self._sort_reverse)
 
@@ -180,15 +193,15 @@ class WindowsAppsPage(PageBase):
         for name, entry in rows:
             if not isinstance(entry, dict):
                 target, args_display, display_type, added = "", "", "Invalid", ""
-                status = svc.windows_app_status(name, entry, installed_steam_ids)
+                status = svc.pc_game_status(name, entry, installed_steam_ids)
             else:
                 launch_type = str(entry.get("type", "executable")).lower()
                 target = entry.get("uri", "") if launch_type == "uri" else entry.get("exe", "")
                 args = entry.get("args", [])
                 args_display = " ".join(str(a) for a in args) if isinstance(args, list) and launch_type == "executable" else ""
-                display_type = svc.windows_app_display_type(entry)
+                display_type = svc.pc_game_display_type(entry)
                 added = str(entry.get("added_at", ""))[:10]
-                status = svc.windows_app_status(name, entry, installed_steam_ids)
+                status = svc.pc_game_status(name, entry, installed_steam_ids)
 
             haystack = f"{name} {display_type} {target} {args_display} {added}".casefold()
             if query and query not in haystack:
@@ -225,7 +238,7 @@ class WindowsAppsPage(PageBase):
     def _scan_steam_summary(self):
         games = svc.installed_steam_games()
         installed_ids = {g["appid"] for g in games}
-        added_ids = svc.steam_ids_already_added(svc.load_windows_apps())
+        added_ids = svc.steam_ids_already_added(svc.load_pc_games())
         in_iisu = len(installed_ids & added_ids)
         available = len(installed_ids - added_ids)
         libraries = len(svc.steam_library_paths())
@@ -240,34 +253,34 @@ class WindowsAppsPage(PageBase):
 
     # == Add / edit / duplicate / remove ==
 
-    def _add_windows_app(self) -> None:
-        dialog = WindowsAppDialog(self, "Add Windows Application")
+    def _add_pc_game(self) -> None:
+        dialog = PcGameDialog(self, "Add Windows Application")
         dialog.exec()
         if not dialog.result_values:
             return
         name, entry = dialog.result_values
         if not name:
             return
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         try:
-            svc.create_windows_app(name, entry, apps, self._windows_dir())
-            svc.save_windows_apps(apps)
-        except svc.WindowsAppsServiceError as e:
-            QMessageBox.critical(self, "Windows Apps", str(e))
+            svc.create_pc_game(name, entry, apps, self._windows_dir())
+            svc.save_pc_games(apps)
+        except svc.PcGamesServiceError as e:
+            QMessageBox.critical(self, "PC Apps", str(e))
             return
         self._refresh_tree()
 
-    def _edit_windows_app(self) -> None:
+    def _edit_pc_game(self) -> None:
         selected = self._selected_names()
         if not selected:
             QMessageBox.information(self, "Nothing selected", "Select a Windows app first.")
             return
         old_name = selected[0]
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         old_entry = apps.get(old_name)
         if not isinstance(old_entry, dict):
             return
-        dialog = WindowsAppDialog(self, "Edit Windows Application", old_name, old_entry)
+        dialog = PcGameDialog(self, "Edit Windows Application", old_name, old_entry)
         dialog.exec()
         if not dialog.result_values:
             return
@@ -276,72 +289,72 @@ class WindowsAppsPage(PageBase):
             QMessageBox.critical(self, "Duplicate", f"A Windows app named '{new_name}' already exists.")
             return
         try:
-            svc.rename_windows_app_placeholder(self._windows_dir(), old_name, new_name)
-        except svc.WindowsAppsServiceError as e:
-            QMessageBox.critical(self, "Windows Apps", str(e))
+            svc.rename_pc_game_placeholder(self._windows_dir(), old_name, new_name)
+        except svc.PcGamesServiceError as e:
+            QMessageBox.critical(self, "PC Apps", str(e))
             return
         apps.pop(old_name, None)
         apps[new_name] = new_entry
-        svc.save_windows_apps(apps)
+        svc.save_pc_games(apps)
         self._refresh_tree()
 
-    def _duplicate_windows_app(self) -> None:
+    def _duplicate_pc_game(self) -> None:
         selected = self._selected_names()
         if len(selected) != 1:
             QMessageBox.information(self, "Select one", "Select one Windows app to duplicate.")
             return
         source_name = selected[0]
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         entry = apps.get(source_name)
         if not isinstance(entry, dict):
             return
         base = f"{source_name} Copy"
-        suggested = svc.unique_windows_app_name(base, apps)
+        suggested = svc.unique_pc_game_name(base, apps)
         cloned = json.loads(json.dumps(entry))
-        dialog = WindowsAppDialog(self, "Duplicate Windows Application", suggested, cloned)
+        dialog = PcGameDialog(self, "Duplicate Windows Application", suggested, cloned)
         dialog.exec()
         if not dialog.result_values:
             return
         name, new_entry = dialog.result_values
         try:
-            svc.create_windows_app(name, new_entry, apps, self._windows_dir())
-            svc.save_windows_apps(apps)
-        except svc.WindowsAppsServiceError as e:
-            QMessageBox.critical(self, "Windows Apps", str(e))
+            svc.create_pc_game(name, new_entry, apps, self._windows_dir())
+            svc.save_pc_games(apps)
+        except svc.PcGamesServiceError as e:
+            QMessageBox.critical(self, "PC Apps", str(e))
             return
         self._refresh_tree()
 
-    def _remove_windows_app(self) -> None:
+    def _remove_pc_game(self) -> None:
         selected = self._selected_names()
         if not selected:
             QMessageBox.information(self, "Nothing selected", "Select one or more applications first.")
             return
         reply = QMessageBox.question(
             self,
-            "Remove Windows Apps?",
-            f"Remove {len(selected)} selected application(s) from iiSU-PC?\n\n"
+            "Remove PC Apps?",
+            f"Remove {len(selected)} selected application(s) from Community-iiSU-PC?\n\n"
             "Their .pcgame placeholders are removed too. The applications themselves aren't uninstalled.",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         windows_dir = self._windows_dir()
         for name in selected:
             apps.pop(name, None)
-            svc.remove_windows_app_placeholder(windows_dir, name)
-        svc.save_windows_apps(apps)
+            svc.remove_pc_game_placeholder(windows_dir, name)
+        svc.save_pc_games(apps)
         self._refresh_tree()
         self._refresh_steam_summary()
 
     # == Test / open location ==
 
-    def _test_windows_app(self) -> None:
+    def _test_pc_game(self) -> None:
         selected = self._selected_names()
         if len(selected) != 1:
             QMessageBox.information(self, "Select one", "Select one Windows app to test.")
             return
         name = selected[0]
-        entry = svc.load_windows_apps().get(name)
+        entry = svc.load_pc_games().get(name)
         if not isinstance(entry, dict):
             QMessageBox.critical(self, "Can't test", f"'{name}' has an invalid configuration entry.")
             return
@@ -355,17 +368,17 @@ class WindowsAppsPage(PageBase):
                 executable, args, working_dir = svc.resolve_executable_launch(entry)
                 subprocess.Popen([str(executable), *args], cwd=str(working_dir))
             else:
-                raise svc.WindowsAppsServiceError(f"'{name}' has an unknown launch type: {launch_type}")
-        except (svc.WindowsAppsServiceError, OSError) as e:
+                raise svc.PcGamesServiceError(f"'{name}' has an unknown launch type: {launch_type}")
+        except (svc.PcGamesServiceError, OSError) as e:
             QMessageBox.critical(self, "Launch failed", f"Couldn't launch '{name}'.\n\n{e}")
 
-    def _windows_app_open_or_copy(self) -> None:
+    def _pc_game_open_or_copy(self) -> None:
         selected = self._selected_names()
         if len(selected) != 1:
             QMessageBox.information(self, "Select one", "Select one Windows app first.")
             return
         name = selected[0]
-        entry = svc.load_windows_apps().get(name)
+        entry = svc.load_pc_games().get(name)
         if not isinstance(entry, dict):
             return
         if str(entry.get("type", "executable")).lower() == "uri":
@@ -399,7 +412,7 @@ class WindowsAppsPage(PageBase):
 
     def _sync_repair(self) -> None:
         windows_dir = self._windows_dir()
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         missing, orphans = svc.find_missing_and_orphan_placeholders(apps, windows_dir)
         repaired = svc.repair_missing_placeholders(windows_dir, missing)
         self._refresh_tree()
@@ -410,15 +423,15 @@ class WindowsAppsPage(PageBase):
         if orphans:
             summary.append(f"Found {len(orphans)} unconfigured placeholder(s): " + ", ".join(p.name for p in orphans))
         if not summary:
-            QMessageBox.information(self, "Windows Apps", "Everything is already in sync. No repairs were needed.")
+            QMessageBox.information(self, "PC Apps", "Everything is already in sync. No repairs were needed.")
             return
 
         if orphans:
-            reply = QMessageBox.question(self, "Windows Apps: Sync / Repair", "\n\n".join(summary) + "\n\nConfigure the unconfigured placeholders now?")
+            reply = QMessageBox.question(self, "PC Apps: Sync / Repair", "\n\n".join(summary) + "\n\nConfigure the unconfigured placeholders now?")
             if reply == QMessageBox.StandardButton.Yes:
-                apps = svc.load_windows_apps()
+                apps = svc.load_pc_games()
                 for orphan in orphans:
-                    dialog = WindowsAppDialog(self, "Configure Existing Placeholder", orphan.stem)
+                    dialog = PcGameDialog(self, "Configure Existing Placeholder", orphan.stem)
                     dialog.exec()
                     if not dialog.result_values:
                         continue
@@ -430,31 +443,31 @@ class WindowsAppsPage(PageBase):
                         if orphan != windows_dir / f"{new_name}.pcgame":
                             orphan.rename(windows_dir / f"{new_name}.pcgame")
                     except OSError as e:
-                        QMessageBox.critical(self, "Windows Apps", f"Couldn't rename the placeholder:\n\n{e}")
+                        QMessageBox.critical(self, "PC Apps", f"Couldn't rename the placeholder:\n\n{e}")
                         continue
                     apps[new_name] = entry
-                svc.save_windows_apps(apps)
+                svc.save_pc_games(apps)
                 self._refresh_tree()
                 return
-        QMessageBox.information(self, "Windows Apps: Sync / Repair", "\n\n".join(summary))
+        QMessageBox.information(self, "PC Apps: Sync / Repair", "\n\n".join(summary))
 
     # == Health check ==
 
     def _open_health_check(self) -> None:
-        dialog = WindowsAppsHealthDialog(self, self._windows_dir(), self._refresh_tree)
+        dialog = PcGamesHealthDialog(self, self._windows_dir(), self._refresh_tree)
         dialog.exec()
         self._refresh_tree()
         self._refresh_steam_summary()
 
     # == Export / import ==
 
-    def _export_windows_apps(self) -> None:
-        apps = svc.load_windows_apps()
+    def _export_pc_games(self) -> None:
+        apps = svc.load_pc_games()
         if not apps:
-            QMessageBox.information(self, "Export", "There are no Windows Apps to export.")
+            QMessageBox.information(self, "Export", "There are no PC Apps to export.")
             return
         path, _filter = QFileDialog.getSaveFileName(
-            self, "Export Windows Apps", "windows_apps_export.json", "JSON files (*.json);;All files (*.*)"
+            self, "Export PC Apps", "pc_games_export.json", "JSON files (*.json);;All files (*.*)"
         )
         if not path:
             return
@@ -466,11 +479,11 @@ class WindowsAppsPage(PageBase):
         QMessageBox.information(
             self,
             "Export complete",
-            "Windows Apps exported.\n\nSteam and URI entries are portable. Executable paths may need updating on another PC.",
+            "PC Apps exported.\n\nSteam and URI entries are portable. Executable paths may need updating on another PC.",
         )
 
-    def _import_windows_apps_file(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(self, "Import Windows Apps", filter="JSON files (*.json);;All files (*.*)")
+    def _import_pc_games_file(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(self, "Import PC Apps", filter="JSON files (*.json);;All files (*.*)")
         if not path:
             return
         try:
@@ -480,13 +493,13 @@ class WindowsAppsPage(PageBase):
             return
         incoming = svc.parse_import_payload(payload)
         if incoming is None:
-            QMessageBox.critical(self, "Import failed", "That file doesn't contain a Windows Apps mapping.")
+            QMessageBox.critical(self, "Import failed", "That file doesn't contain a PC Apps mapping.")
             return
 
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         existing_steam_ids = svc.steam_ids_already_added(apps)
-        added, skipped = svc.import_windows_apps(incoming, apps, self._windows_dir(), existing_steam_ids)
-        svc.save_windows_apps(apps)
+        added, skipped = svc.import_pc_games(incoming, apps, self._windows_dir(), existing_steam_ids)
+        svc.save_pc_games(apps)
         self._refresh_tree()
         QMessageBox.information(self, "Import complete", f"Imported {added} application(s).\nSkipped {skipped} duplicate/invalid item(s).")
 
@@ -497,7 +510,7 @@ class WindowsAppsPage(PageBase):
         dialog.exec()
         if not dialog.chosen:
             return
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         windows_dir = self._windows_dir()
         existing_steam_ids = svc.steam_ids_already_added(apps)
         imported = skipped = 0
@@ -505,16 +518,16 @@ class WindowsAppsPage(PageBase):
             if appid in existing_steam_ids:
                 skipped += 1
                 continue
-            name = svc.unique_windows_app_name(svc.safe_steam_pcgame_name(game_name), apps)
+            name = svc.unique_pc_game_name(svc.safe_steam_pcgame_name(game_name), apps)
             entry = {"type": "uri", "uri": f"steam://rungameid/{appid}", "steam_name": game_name}
             try:
-                svc.create_windows_app(name, entry, apps, windows_dir)
-            except svc.WindowsAppsServiceError:
+                svc.create_pc_game(name, entry, apps, windows_dir)
+            except svc.PcGamesServiceError:
                 skipped += 1
                 continue
             imported += 1
             existing_steam_ids.add(appid)
-        svc.save_windows_apps(apps)
+        svc.save_pc_games(apps)
         self._refresh_tree()
         self._refresh_steam_summary()
         QMessageBox.information(self, "Steam import complete", f"Imported {imported} game(s).\nSkipped {skipped} item(s).")
@@ -524,7 +537,7 @@ class WindowsAppsPage(PageBase):
         if not games:
             QMessageBox.information(self, "Auto-import Steam Games", "No installed Steam games were found.")
             return
-        apps = svc.load_windows_apps()
+        apps = svc.load_pc_games()
         already = svc.steam_ids_already_added(apps)
         missing = [g for g in games if g["appid"] not in already]
         if not missing:
@@ -539,7 +552,7 @@ class WindowsAppsPage(PageBase):
             self,
             "Auto-import Steam Games",
             f"Add {len(missing)} installed Steam game(s) not yet in iiSU?\n\n{preview}\n\n"
-            "This creates their Windows Apps mappings and .pcgame placeholders.",
+            "This creates their PC Apps mappings and .pcgame placeholders.",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -548,16 +561,16 @@ class WindowsAppsPage(PageBase):
         imported = skipped = 0
         for game in missing:
             appid = game["appid"]
-            name = svc.unique_windows_app_name(svc.safe_steam_pcgame_name(game["name"]), apps)
+            name = svc.unique_pc_game_name(svc.safe_steam_pcgame_name(game["name"]), apps)
             entry = {"type": "uri", "uri": f"steam://rungameid/{appid}", "steam_name": game["name"]}
             try:
-                svc.create_windows_app(name, entry, apps, windows_dir)
-            except svc.WindowsAppsServiceError:
+                svc.create_pc_game(name, entry, apps, windows_dir)
+            except svc.PcGamesServiceError:
                 skipped += 1
                 continue
             already.add(appid)
             imported += 1
-        svc.save_windows_apps(apps)
+        svc.save_pc_games(apps)
         self._refresh_tree()
         self._refresh_steam_summary()
         QMessageBox.information(
@@ -571,26 +584,26 @@ class WindowsAppsPage(PageBase):
         if item is not None and not item.isSelected():
             self.tree.setCurrentItem(item)
         menu = QMenu(self)
-        menu.addAction("Launch / Test", self._test_windows_app)
-        menu.addAction("Edit...", self._edit_windows_app)
-        menu.addAction("Duplicate...", self._duplicate_windows_app)
+        menu.addAction("Launch / Test", self._test_pc_game)
+        menu.addAction("Edit...", self._edit_pc_game)
+        menu.addAction("Duplicate...", self._duplicate_pc_game)
         menu.addSeparator()
-        menu.addAction("Open Location / Copy URI", self._windows_app_open_or_copy)
+        menu.addAction("Open Location / Copy URI", self._pc_game_open_or_copy)
         menu.addAction("Repair Placeholders", self._repair_selected)
         menu.addSeparator()
-        menu.addAction("Remove Selected", self._remove_windows_app)
+        menu.addAction("Remove Selected", self._remove_pc_game)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _show_more_menu(self, anchor_button: QPushButton) -> None:
         menu = QMenu(self)
         menu.addAction("Import Steam Library...", self._import_steam_library)
-        menu.addAction("Duplicate...", self._duplicate_windows_app)
+        menu.addAction("Duplicate...", self._duplicate_pc_game)
         menu.addSeparator()
-        menu.addAction("Open Location / Copy URI", self._windows_app_open_or_copy)
+        menu.addAction("Open Location / Copy URI", self._pc_game_open_or_copy)
         menu.addAction("Sync / Repair...", self._sync_repair)
         menu.addSeparator()
-        menu.addAction("Export...", self._export_windows_apps)
-        menu.addAction("Import...", self._import_windows_apps_file)
+        menu.addAction("Export...", self._export_pc_games)
+        menu.addAction("Import...", self._import_pc_games_file)
         menu.addSeparator()
         menu.addAction("Open Placeholder Folder", self._open_windows_roms)
         menu.addAction("Delete Old Location...", self._delete_legacy_stubs)
@@ -602,26 +615,26 @@ class WindowsAppsPage(PageBase):
             windows_dir.mkdir(parents=True, exist_ok=True)
             open_uri(str(windows_dir))
         except OSError as e:
-            QMessageBox.critical(self, "Windows Apps", str(e))
+            QMessageBox.critical(self, "PC Apps", str(e))
 
     def _delete_legacy_stubs(self) -> None:
         roms_dir = self.window.config_data.get("roms_dir", "")
-        legacy_dir = svc.legacy_windows_stubs_dir(roms_dir)
+        legacy_dir = svc.legacy_pc_game_stubs_dir(roms_dir)
         if legacy_dir is None:
-            QMessageBox.information(self, "Windows Apps", "No old placeholder folder found under your ROM directory.")
+            QMessageBox.information(self, "PC Apps", "No old placeholder folder found under your ROM directory.")
             return
         count = sum(1 for _ in legacy_dir.glob("*.pcgame"))
         reply = QMessageBox.question(
             self,
             "Delete Old Placeholder Folder",
             f"Delete {legacy_dir}?\n\nIt holds {count} old .pcgame placeholder(s) from before they moved to "
-            f"{svc.WINDOWS_STUBS_DIR}. Only delete once your Windows Apps still work. This can't be undone.",
+            f"{svc.PC_GAME_STUBS_DIR}. Only delete once your PC Apps still work. This can't be undone.",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            svc.delete_legacy_windows_stubs(roms_dir)
-        except svc.WindowsAppsServiceError as e:
-            QMessageBox.critical(self, "Windows Apps", str(e))
+            svc.delete_legacy_pc_game_stubs(roms_dir)
+        except svc.PcGamesServiceError as e:
+            QMessageBox.critical(self, "PC Apps", str(e))
             return
-        QMessageBox.information(self, "Windows Apps", f"Deleted {legacy_dir}.")
+        QMessageBox.information(self, "PC Apps", f"Deleted {legacy_dir}.")
