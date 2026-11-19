@@ -18,10 +18,10 @@ list, which iiSU reads from the VM at
 
 - **Atari Jaguar CD** (`atarijaguarcd`): `.cue`/`.cdi`/`.chd`, launched with BigPEmu or RetroArch's Virtual Jaguar core (for RetroAchievements).
 - **Sony PlayStation 4** (`ps4`): `.ps4` serial files, launched with shadPS4.
-- **Sony PlayStation 5** (`ps5`): `.ps5` files; no PC emulator yet.
+- **Sony PlayStation 5** (`ps5`): `.ps5` serial files, launched with KytyPS5.
 - **Nintendo Switch 2** (`switch2`): `.xci`/`.nsp`/`.xcz`/`.nsz`, launched with Lichii (its only option).
 
-Each launches RetroArch with a made-up core name (`bigpemu`, `shadps4`, `ps5`, `lichii`)
+Each launches RetroArch with a made-up core name (`bigpemu`, `shadps4`, `kyty`, `lichii`)
 that the launch bridge turns into the PC emulator. iiSU replaces the device
 copy when an iiSU update ships a newer console list (emuladores.version.txt),
 so these entries then need adding again.

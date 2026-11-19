@@ -36,6 +36,10 @@ A PS3 game installed to RPCS3's HDD is a folder, not a single file iiSU can list
 
 A dumped PS4 game is a folder (`CUSA00900` with its `-patch` and `addcont` folders). Put it in `<ROM directory>/ps4/` and add a text file next to it ending in `.ps4` (for example `Bloodborne.ps4`) containing only the serial (`CUSA00900`). iiSU lists the `.ps4` file, and the launch bridge starts shadPS4 with that game's `eboot.bin`. The game folders themselves stay out of the sync.
 
+### PS5 games
+
+A dumped PS5 game is a folder (`eboot.bin`, `sce_sys`, ...). Put it in `<ROM directory>/ps5/`, named after its serial or containing it (`ASTRO BOT PPSA21564` works), and add a text file next to it ending in `.ps5` (for example `Astro Bot.ps5`) containing only the serial (`PPSA21564`). iiSU lists the `.ps5` file, and the launch bridge starts KytyPS5 (`kyty_emulator.exe --fullscreen --game <eboot.bin>`). KytyPS5's launcher takes no game on its command line, so its saved settings don't apply to these launches.
+
 ### Xbox Live Arcade games
 
 An Xbox Live Arcade game extracted for Xenia is a folder (`default.xex` and its assets), often named by a long content hash. Next to that folder in `<ROM directory>/xbox360`, add a text file ending in `.xbla`, named the way you want it listed (for example `Space Invaders Extreme.xbla`), containing the folder's name. iiSU lists the `.xbla` file with your other Xbox 360 games, the folder itself is left out of the sync, and the launch bridge starts Xenia with the folder's `default.xex`. An empty `.xbla` file named after the folder works too.

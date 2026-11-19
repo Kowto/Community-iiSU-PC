@@ -29,6 +29,7 @@ from emulator_lookup import (  # noqa: E402
     find_rom,
     friendly_emulator_name,
     read_serial_file,
+    resolve_ps5_serial_file,
     resolve_xbla_file,
     unresolved_serial_file_reason,
     load_path_cache,
@@ -345,6 +346,13 @@ class JaguarCdRoutingTests(unittest.TestCase):
         self.assertEqual(profile["exe_names"], ["lichii.exe", "Lichii.exe"])
         self.assertEqual(profile["pre_args"], ["-f", "-g"])
 
+    def test_the_ps5_console_launches_kytyps5_fullscreen(self):
+        for core in ("kyty_libretro_android.so", "ps5_libretro_android.so"):
+            with self.subTest(core):
+                profile = find_emulator_for_package("com.retroarch", self.emulators, "Astro Bot.ps5", core)
+                self.assertEqual(profile["exe_names"], ["kyty_emulator.exe"])
+                self.assertEqual(profile["pre_args"], ["--fullscreen", "--game"])
+
     def test_the_bigpemu_choice_launches_bigpemu(self):
         profile = find_emulator_for_package("com.retroarch", self.emulators, "Myst (USA).cue", "bigpemu_libretro_android.so")
         self.assertEqual(profile["exe_names"], ["BigPEmu.exe", "bigpemu.exe"])
@@ -555,3 +563,41 @@ class XblaFileTests(unittest.TestCase):
         bad = self._launcher(b"NoSuchFolder", name="Bad.xbla")
         self.assertEqual(find_rom("Bad.xbla", self.root, cache), bad)
         self.assertIn("NoSuchFolder", unresolved_serial_file_reason(bad, self.root))
+
+
+class Ps5SerialFileTests(unittest.TestCase):
+    """A .ps5 file holding a serial launches the eboot.bin of the folder
+    named after (or containing) that serial."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        patch("builtins.print").start()
+        self.addCleanup(patch.stopall)
+        self.ps5 = self.root / "ps5"
+        self.ps5.mkdir()
+        self.stub = self.ps5 / "Astro Bot.ps5"
+        self.stub.write_text("PPSA21564")
+
+    def _eboot(self, folder):
+        eboot = self.ps5 / folder / "eboot.bin"
+        eboot.parent.mkdir(parents=True)
+        eboot.write_bytes(b"x")
+        return eboot
+
+    def test_a_folder_containing_the_serial_resolves(self):
+        eboot = self._eboot("ASTRO BOT PPSA21564")
+        self.assertEqual(resolve_ps5_serial_file(self.stub, self.root), eboot)
+
+    def test_the_exact_folder_wins_and_update_folders_are_skipped(self):
+        self._eboot("PPSA21564-patch")
+        self.assertEqual(resolve_ps5_serial_file(self.stub, self.root), self.stub)
+        eboot = self._eboot("PPSA21564")
+        self.assertEqual(resolve_ps5_serial_file(self.stub, self.root), eboot)
+
+    def test_find_rom_and_the_failure_reason(self):
+        cache = {"roms": {}}
+        self.assertEqual(find_rom("Astro Bot.ps5", self.root, cache), self.stub)
+        self.assertIn("PPSA21564", unresolved_serial_file_reason(self.stub, self.root))
+        eboot = self._eboot("ASTRO BOT PPSA21564")
+        self.assertEqual(find_rom("Astro Bot.ps5", self.root, cache), eboot)

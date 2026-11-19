@@ -242,7 +242,9 @@ def find_rom(
     if match is None:
         match = _find_by_name(roms_dir, {rom_filename}, ROM_SEARCH_MAX_DEPTH)
     if match:
-        match = resolve_xbla_file(resolve_ps4_serial_file(resolve_ps3_serial_file(match, roms_dir), roms_dir))
+        match = resolve_xbla_file(
+            resolve_ps5_serial_file(resolve_ps4_serial_file(resolve_ps3_serial_file(match, roms_dir), roms_dir), roms_dir)
+        )
         # A serial file that didn't resolve to its game isn't cached, so the
         # next launch looks again once the file or the game folder is fixed.
         if match.suffix.lower() in SERIAL_FILE_EXTENSIONS:
@@ -336,6 +338,54 @@ def resolve_ps4_serial_file(path: Path, roms_dir: Path) -> Path:
     return path
 
 
+PS5_SERIAL_EXTENSION = ".ps5"
+# Folders holding a game's update or DLC rather than the game; their names
+# carry the serial too (PPSA21564-patch, CUSA00900-patch).
+_NOT_A_BASE_GAME_FOLDER = re.compile(r"patch|update|addcont|dlc", re.IGNORECASE)
+
+
+def _named_game_folders(parent: Path, serial: str) -> list[Path]:
+    """Folders in parent named after serial: exactly, then any whose name
+    contains it (e.g. "ASTRO BOT PPSA21564"), leaving out update and DLC
+    folders."""
+    exact = parent / serial
+    found = [exact] if exact.is_dir() else []
+    try:
+        children = sorted(parent.iterdir())
+    except OSError:
+        return found
+    needle = serial.lower()
+    for child in children:
+        if child == exact or not child.is_dir():
+            continue
+        if needle in child.name.lower() and not _NOT_A_BASE_GAME_FOLDER.search(child.name):
+            found.append(child)
+    return found
+
+
+def resolve_ps5_serial_file(path: Path, roms_dir: Path) -> Path:
+    """A PS5 game dump is a folder (eboot.bin, sce_sys, ...), which iiSU
+    can't list, so a small <name>.ps5 text file holding the game's serial
+    (e.g. PPSA21564) stands in for it, like .ps4 files do. The game folder
+    is the one named after the serial, or containing it ("ASTRO BOT
+    PPSA21564"), next to the .ps5 file or in <ROM directory>/ps5; the file
+    is swapped for that folder's eboot.bin, which KytyPS5 boots."""
+    if path.suffix.lower() != PS5_SERIAL_EXTENSION:
+        return path
+    serial = read_serial_file(path)
+    if serial is None:
+        print(f"[bridge] {path.name} doesn't hold a PS5 serial (like PPSA21564) on its first line")
+        return path
+    ps5_dir = Path(roms_dir) / "ps5"
+    for parent in (path.parent, path.parent / "game", ps5_dir, ps5_dir / "game"):
+        for game_dir in _named_game_folders(parent, serial):
+            for name in ("eboot.bin", "EBOOT.BIN"):
+                if (game_dir / name).is_file():
+                    return game_dir / name
+    print(f"[bridge] PS5 game {serial} (from {path.name}) not found next to it or under {ps5_dir}")
+    return path
+
+
 XBLA_EXTENSION = ".xbla"
 XBLA_BOOT_FILE = "default.xex"
 
@@ -389,16 +439,19 @@ def unresolved_serial_file_reason(path: Path, roms_dir: Path) -> str | None:
     suffix = path.suffix.lower()
     if suffix == XBLA_EXTENSION:
         return f"{path.name} points at {xbla_target(path)}, which has no {XBLA_BOOT_FILE}"
-    if suffix not in (PS3_SERIAL_EXTENSION, PS4_SERIAL_EXTENSION):
+    if suffix not in (PS3_SERIAL_EXTENSION, PS4_SERIAL_EXTENSION, PS5_SERIAL_EXTENSION):
         return None
     serial = read_serial_file(path)
     if serial is None:
-        example = "NPUA80472" if suffix == PS3_SERIAL_EXTENSION else "CUSA00900"
+        example = {PS3_SERIAL_EXTENSION: "NPUA80472", PS4_SERIAL_EXTENSION: "CUSA00900"}.get(suffix, "PPSA21564")
         return f"{path.name} doesn't hold a serial like {example} on its first line"
     if suffix == PS3_SERIAL_EXTENSION:
         expected = Path(roms_dir) / "ps3" / "game" / serial / "USRDIR" / "EBOOT.BIN"
-    else:
+    elif suffix == PS4_SERIAL_EXTENSION:
         expected = Path(roms_dir) / "ps4" / serial / "eboot.bin"
+    else:
+        return (f"{path.name} names {serial}, but no folder named after it (or containing it) with an "
+                f"eboot.bin was found next to it or in {Path(roms_dir) / 'ps5'}")
     return f"{path.name} names {serial}, but no {expected} (or the other places it's looked for) exists"
 
 

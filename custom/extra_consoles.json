@@ -94,12 +94,12 @@
       "emulators": [
         {
           "id": "retroarch",
-          "name": "RetroArch",
+          "name": "KytyPS5",
           "routeType": "path",
           "commands": [
             {
-              "description": "No PC emulator yet",
-              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/ps5_libretro_android.so -e ROM %ROM% --activity-clear-top"
+              "description": "KytyPS5 (PC)",
+              "command": "%PACKAGE%/com.retroarch.browser.retroactivity.RetroActivityFuture -e CONFIGFILE /storage/emulated/0/Android/data/%PACKAGE%/files/retroarch.cfg -e LIBRETRO /data/data/%PACKAGE%/cores/kyty_libretro_android.so -e ROM %ROM% --activity-clear-top"
             }
           ],
           "packages": [
