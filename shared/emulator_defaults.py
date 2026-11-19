@@ -370,6 +370,9 @@ ANDROID_CORE_NAME_OVERRIDES = {
 # and unambiguous even when the extension isn't, so it's checked first
 # and wins outright, the same way an extension safety-net entry already
 # wins outright over the generic by-extension RetroArch guess.
+KYTY_EXE_NAMES = ["kyty_emulator.exe"]
+KYTY_PRE_ARGS = ["--fullscreen", "--game"]
+
 RETROARCH_CORE_OVERRIDES = {
     "flycast_libretro.dll": ("dreamcast", ["flycast.exe"], FLYCAST_PRE_ARGS),
     # Not a real libretro core: the Atari Jaguar CD console added to iiSU's
@@ -387,6 +390,13 @@ RETROARCH_CORE_OVERRIDES = {
     # RetroArch entry naming a "lichii" core, routed here to Lichii (an
     # Eden/yuzu-based Switch 2 emulator). -f opens fullscreen, -g takes the game.
     "lichii_libretro.dll": ("switch2", ["lichii.exe", "Lichii.exe"], ["-f", "-g"]),
+    # And the hand-added PlayStation 5 console: "kyty" (and "ps5", the
+    # placeholder core its first entry named) start KytyPS5's emulator with
+    # the game's eboot.bin, resolved from a .ps5 serial file. The launcher
+    # (kyty_launcher.exe) takes no game on its command line, so its saved
+    # settings don't apply; KytyPS5's defaults do, plus fullscreen.
+    "kyty_libretro.dll": ("ps5", KYTY_EXE_NAMES, KYTY_PRE_ARGS),
+    "ps5_libretro.dll": ("ps5", KYTY_EXE_NAMES, KYTY_PRE_ARGS),
 }
 
 
